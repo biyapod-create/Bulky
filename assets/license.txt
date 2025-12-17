@@ -1,0 +1,50 @@
+BULKY EMAIL SENDER - TERMS AND CONDITIONS
+
+Last Updated: December 2024
+
+Please read these Terms and Conditions carefully before using Bulky Email Sender.
+
+1. ACCEPTANCE OF TERMS
+By installing and using Bulky Email Sender ("the Software"), you agree to be bound by these Terms and Conditions. If you do not agree to these terms, do not install or use the Software.
+
+2. LICENSE GRANT
+AllenRetro grants you a non-exclusive, non-transferable, limited license to use the Software for legitimate email marketing purposes in accordance with all applicable laws.
+
+3. ACCEPTABLE USE
+You agree to use the Software only for lawful purposes. You shall NOT use the Software to:
+- Send unsolicited bulk emails (spam)
+- Send emails to recipients who have not opted-in to receive communications
+- Send emails containing malware, viruses, or malicious content
+- Send fraudulent, deceptive, or misleading messages
+- Harvest email addresses without consent
+- Violate any anti-spam laws including CAN-SPAM, GDPR, CASL, or similar regulations
+- Engage in phishing or identity theft
+- Send emails that infringe on intellectual property rights
+
+4. USER RESPONSIBILITIES
+- You are responsible for obtaining proper consent from email recipients
+- You must include valid unsubscribe options in marketing emails
+- You must maintain accurate sender information
+- You must comply with all applicable email marketing laws in your jurisdiction
+
+5. DISCLAIMER OF WARRANTIES
+THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND. ALLENRETRO DISCLAIMS ALL WARRANTIES, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
+
+6. LIMITATION OF LIABILITY
+ALLENRETRO SHALL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, OR CONSEQUENTIAL DAMAGES ARISING FROM THE USE OF THIS SOFTWARE.
+
+7. EMAIL DELIVERABILITY
+AllenRetro does not guarantee email deliverability. Email delivery depends on many factors including your sender reputation, email content, and recipient email providers.
+
+8. PRIVACY
+The Software stores data locally on your computer. AllenRetro does not collect, transmit, or store your personal data or email lists.
+
+9. UPDATES
+AllenRetro may update these terms at any time. Continued use of the Software constitutes acceptance of updated terms.
+
+10. TERMINATION
+This license is effective until terminated. Your rights under this license will terminate automatically if you fail to comply with any of its terms.
+
+By clicking "I Agree" or installing this software, you acknowledge that you have read, understood, and agree to be bound by these Terms and Conditions.
+
+© 2024 AllenRetro. All Rights Reserved.

@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+renderer/node_modules/
+
+# Build outputs
+dist/
+renderer/build/
+
+# Environment and local files
+.env
+.env.local
+*.log
+npm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+temp_*.b64
