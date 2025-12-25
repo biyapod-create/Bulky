@@ -2,12 +2,32 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const XLSX = require('xlsx');
-const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
 const Database = require('./database/db');
 const EmailService = require('./services/emailService');
 const VerificationService = require('./services/verificationService');
 const SpamService = require('./services/spamService');
+
+// PDF parsing helper - extracts emails from PDF without canvas dependency
+const parsePdfForEmails = async (filePath) => {
+  try {
+    // Dynamic import to avoid startup issues
+    const pdfParse = require('pdf-parse/lib/pdf-parse');
+    const dataBuffer = fs.readFileSync(filePath);
+    const data = await pdfParse(dataBuffer);
+    return data.text || '';
+  } catch (err) {
+    // Fallback: try to read raw bytes and extract emails with regex
+    console.error('PDF parse error, using fallback:', err.message);
+    try {
+      const buffer = fs.readFileSync(filePath);
+      const text = buffer.toString('utf-8', 0, Math.min(buffer.length, 1000000));
+      return text;
+    } catch (e) {
+      return '';
+    }
+  }
+};
 
 let mainWindow;
 let db;
@@ -220,9 +240,8 @@ ipcMain.handle('contacts:import', async () => {
       }
       // PDF files
       else if (ext === '.pdf') {
-        const dataBuffer = fs.readFileSync(filePath);
-        const pdfData = await pdfParse(dataBuffer);
-        parsed = extractEmailsFromText(pdfData.text);
+        const pdfText = await parsePdfForEmails(filePath);
+        parsed = extractEmailsFromText(pdfText);
       }
       // Word files (.docx)
       else if (ext === '.docx') {
