@@ -9,11 +9,20 @@ contextBridge.exposeInMainWorld('electron', {
   // Contacts
   contacts: {
     getAll: () => ipcRenderer.invoke('contacts:getAll'),
+    getFiltered: (filter) => ipcRenderer.invoke('contacts:getFiltered', filter),
     add: (contact) => ipcRenderer.invoke('contacts:add', contact),
     addBulk: (contacts) => ipcRenderer.invoke('contacts:addBulk', contacts),
     update: (contact) => ipcRenderer.invoke('contacts:update', contact),
     delete: (ids) => ipcRenderer.invoke('contacts:delete', ids),
+    deleteByVerification: (status) => ipcRenderer.invoke('contacts:deleteByVerification', status),
     import: () => ipcRenderer.invoke('contacts:import')
+  },
+
+  // Tags
+  tags: {
+    getAll: () => ipcRenderer.invoke('tags:getAll'),
+    add: (tag) => ipcRenderer.invoke('tags:add', tag),
+    delete: (id) => ipcRenderer.invoke('tags:delete', id)
   },
 
   // Lists
@@ -25,28 +34,61 @@ contextBridge.exposeInMainWorld('electron', {
     getContacts: (listId) => ipcRenderer.invoke('lists:getContacts', listId)
   },
 
+  // Blacklist
+  blacklist: {
+    getAll: () => ipcRenderer.invoke('blacklist:getAll'),
+    add: (entry) => ipcRenderer.invoke('blacklist:add', entry),
+    addBulk: (entries) => ipcRenderer.invoke('blacklist:addBulk', entries),
+    remove: (id) => ipcRenderer.invoke('blacklist:remove', id),
+    check: (email) => ipcRenderer.invoke('blacklist:check', email),
+    import: () => ipcRenderer.invoke('blacklist:import')
+  },
+
+  // Unsubscribes
+  unsubscribes: {
+    getAll: () => ipcRenderer.invoke('unsubscribes:getAll'),
+    add: (data) => ipcRenderer.invoke('unsubscribes:add', data),
+    check: (email) => ipcRenderer.invoke('unsubscribes:check', email)
+  },
+
   // Templates
   templates: {
     getAll: () => ipcRenderer.invoke('templates:getAll'),
+    getByCategory: (category) => ipcRenderer.invoke('templates:getByCategory', category),
     add: (template) => ipcRenderer.invoke('templates:add', template),
     update: (template) => ipcRenderer.invoke('templates:update', template),
     delete: (id) => ipcRenderer.invoke('templates:delete', id)
   },
 
-  // Campaigns
-  campaigns: {
-    getAll: () => ipcRenderer.invoke('campaigns:getAll'),
-    add: (campaign) => ipcRenderer.invoke('campaigns:add', campaign),
-    update: (campaign) => ipcRenderer.invoke('campaigns:update', campaign),
-    delete: (id) => ipcRenderer.invoke('campaigns:delete', id),
-    getLogs: (campaignId) => ipcRenderer.invoke('campaigns:getLogs', campaignId)
+  // SMTP Accounts (Multiple)
+  smtpAccounts: {
+    getAll: () => ipcRenderer.invoke('smtpAccounts:getAll'),
+    getActive: () => ipcRenderer.invoke('smtpAccounts:getActive'),
+    add: (account) => ipcRenderer.invoke('smtpAccounts:add', account),
+    update: (account) => ipcRenderer.invoke('smtpAccounts:update', account),
+    delete: (id) => ipcRenderer.invoke('smtpAccounts:delete', id),
+    test: (account) => ipcRenderer.invoke('smtpAccounts:test', account)
   },
 
-  // SMTP
+  // Legacy SMTP (single)
   smtp: {
     get: () => ipcRenderer.invoke('smtp:get'),
     save: (settings) => ipcRenderer.invoke('smtp:save', settings),
     test: (settings) => ipcRenderer.invoke('smtp:test', settings)
+  },
+
+
+  // Campaigns
+  campaigns: {
+    getAll: () => ipcRenderer.invoke('campaigns:getAll'),
+    getScheduled: () => ipcRenderer.invoke('campaigns:getScheduled'),
+    add: (campaign) => ipcRenderer.invoke('campaigns:add', campaign),
+    update: (campaign) => ipcRenderer.invoke('campaigns:update', campaign),
+    delete: (id) => ipcRenderer.invoke('campaigns:delete', id),
+    getLogs: (campaignId) => ipcRenderer.invoke('campaigns:getLogs', campaignId),
+    getAnalytics: (campaignId) => ipcRenderer.invoke('campaigns:getAnalytics', campaignId),
+    schedule: (data) => ipcRenderer.invoke('campaigns:schedule', data),
+    cancelSchedule: (campaignId) => ipcRenderer.invoke('campaigns:cancelSchedule', campaignId)
   },
 
   // Email
@@ -69,9 +111,21 @@ contextBridge.exposeInMainWorld('electron', {
     }
   },
 
-  // Spam Check
+  // Spam Check & Auto-Fix
   spam: {
-    check: (data) => ipcRenderer.invoke('spam:check', data)
+    check: (data) => ipcRenderer.invoke('spam:check', data),
+    autoFix: (data) => ipcRenderer.invoke('spam:autoFix', data),
+    getSuggestions: (word) => ipcRenderer.invoke('spam:getSuggestions', word),
+    getReplacements: () => ipcRenderer.invoke('spam:getReplacements'),
+    addReplacement: (item) => ipcRenderer.invoke('spam:addReplacement', item),
+    updateReplacement: (item) => ipcRenderer.invoke('spam:updateReplacement', item),
+    deleteReplacement: (id) => ipcRenderer.invoke('spam:deleteReplacement', id)
+  },
+
+  // Tracking
+  tracking: {
+    addEvent: (event) => ipcRenderer.invoke('tracking:addEvent', event),
+    getEvents: (campaignId) => ipcRenderer.invoke('tracking:getEvents', campaignId)
   },
 
   // Settings
@@ -88,6 +142,15 @@ contextBridge.exposeInMainWorld('electron', {
   // Export
   export: {
     contacts: (contacts) => ipcRenderer.invoke('export:contacts', contacts),
-    logs: (logs) => ipcRenderer.invoke('export:logs', logs)
+    logs: (logs) => ipcRenderer.invoke('export:logs', logs),
+    blacklist: () => ipcRenderer.invoke('export:blacklist'),
+    verificationResults: (results) => ipcRenderer.invoke('export:verificationResults', results)
+  },
+
+  // Backup & Restore
+  backup: {
+    create: () => ipcRenderer.invoke('backup:create'),
+    restore: () => ipcRenderer.invoke('backup:restore'),
+    getInfo: () => ipcRenderer.invoke('backup:getInfo')
   }
 });

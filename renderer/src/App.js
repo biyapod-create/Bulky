@@ -9,7 +9,9 @@ import Composer from './pages/Composer';
 import Templates from './pages/Templates';
 import Verify from './pages/Verify';
 import SpamChecker from './pages/SpamChecker';
+import Blacklist from './pages/Blacklist';
 import Settings from './pages/Settings';
+import Analytics from './pages/Analytics';
 import ToastContainer from './components/ToastContainer';
 import { ToastProvider } from './components/ToastContext';
 import { ThemeProvider } from './components/ThemeContext';
@@ -32,7 +34,9 @@ function App() {
                   <Route path="/templates" element={<Templates />} />
                   <Route path="/verify" element={<Verify />} />
                   <Route path="/spam-checker" element={<SpamChecker />} />
+                  <Route path="/blacklist" element={<Blacklist />} />
                   <Route path="/settings" element={<Settings />} />
+                  <Route path="/analytics/:campaignId" element={<Analytics />} />
                 </Routes>
               </main>
             </div>

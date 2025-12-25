@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Play, Pause, Square, Trash2, Eye, Send } from 'lucide-react';
+import { Plus, Play, Pause, Square, Trash2, Eye, Send, BarChart3 } from 'lucide-react';
 import Modal from '../components/Modal';
 import { useToast } from '../components/ToastContext';
 import { useNavigate } from 'react-router-dom';
@@ -229,6 +229,13 @@ function Campaigns() {
                             <Play size={14} />
                           </button>
                         )}
+                        <button 
+                          className="btn btn-outline btn-icon btn-sm"
+                          onClick={() => navigate(`/analytics/${campaign.id}`)}
+                          title="Analytics"
+                        >
+                          <BarChart3 size={14} />
+                        </button>
                         <button 
                           className="btn btn-outline btn-icon btn-sm"
                           onClick={() => handleViewLogs(campaign)}

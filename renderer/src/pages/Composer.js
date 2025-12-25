@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Save, Eye, Code, FileText, ShieldCheck } from 'lucide-react';
+import { Save, Eye, Code, FileText, ShieldCheck, Edit3 } from 'lucide-react';
 import { useToast } from '../components/ToastContext';
+import EmailEditor from '../components/EmailEditor';
 
 function Composer() {
   const location = useLocation();
@@ -11,7 +12,7 @@ function Composer() {
 
   const [templates, setTemplates] = useState([]);
   const [lists, setLists] = useState([]);
-  const [viewMode, setViewMode] = useState('edit'); // edit, preview, code
+  const [viewMode, setViewMode] = useState('visual'); // visual, code, preview
   const [spamScore, setSpamScore] = useState(null);
   const [campaign, setCampaign] = useState({
     name: campaignFromNav?.name || '',
@@ -27,12 +28,13 @@ function Composer() {
     loadData();
   }, []);
 
+  // Debounced spam check
   useEffect(() => {
-    // Debounced spam check
     const timer = setTimeout(() => {
       checkSpamScore();
     }, 1000);
     return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [campaign.subject, campaign.content]);
 
   const loadData = async () => {
@@ -157,7 +159,7 @@ function Composer() {
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr', gap: '20px' }}>
+      <div className="composer-grid">
         {/* Left Panel - Settings */}
         <div className="card">
           <h3 className="card-title mb-4">Campaign Settings</h3>
@@ -263,22 +265,22 @@ function Composer() {
           <div className="flex justify-between items-center mb-4">
             <div className="tabs" style={{ marginBottom: 0, borderBottom: 'none' }}>
               <button 
-                className={`tab ${viewMode === 'edit' ? 'active' : ''}`}
-                onClick={() => setViewMode('edit')}
+                className={`tab ${viewMode === 'visual' ? 'active' : ''}`}
+                onClick={() => setViewMode('visual')}
               >
-                Edit
-              </button>
-              <button 
-                className={`tab ${viewMode === 'preview' ? 'active' : ''}`}
-                onClick={() => setViewMode('preview')}
-              >
-                <Eye size={14} style={{ marginRight: '4px' }} /> Preview
+                <Edit3 size={14} style={{ marginRight: '4px' }} /> Visual
               </button>
               <button 
                 className={`tab ${viewMode === 'code' ? 'active' : ''}`}
                 onClick={() => setViewMode('code')}
               >
                 <Code size={14} style={{ marginRight: '4px' }} /> HTML
+              </button>
+              <button 
+                className={`tab ${viewMode === 'preview' ? 'active' : ''}`}
+                onClick={() => setViewMode('preview')}
+              >
+                <Eye size={14} style={{ marginRight: '4px' }} /> Preview
               </button>
             </div>
           </div>
@@ -294,43 +296,20 @@ function Composer() {
             />
           </div>
 
-          {viewMode === 'edit' && (
+          {viewMode === 'visual' && (
             <div className="form-group">
-              <label className="form-label">Email Content</label>
-              <textarea
-                className="form-textarea"
-                style={{ minHeight: '400px', fontFamily: 'inherit' }}
-                placeholder="Write your email content here... Use HTML for formatting."
+              <label className="form-label">Email Content (Visual Editor)</label>
+              <EmailEditor
                 value={campaign.content}
-                onChange={(e) => setCampaign({ ...campaign, content: e.target.value })}
+                onChange={(html) => setCampaign({ ...campaign, content: html })}
+                placeholder="Start typing your email content..."
               />
             </div>
           )}
 
-          {viewMode === 'preview' && (
-            <div 
-              className="preview-content"
-              style={{ 
-                minHeight: '400px', 
-                border: '1px solid var(--border)', 
-                borderRadius: '8px',
-                padding: '20px',
-                background: '#ffffff',
-                color: '#000000'
-              }}
-              dangerouslySetInnerHTML={{ 
-                __html: campaign.content
-                  .replace(/\{\{firstName\}\}/g, 'John')
-                  .replace(/\{\{lastName\}\}/g, 'Doe')
-                  .replace(/\{\{email\}\}/g, 'john@example.com')
-                  .replace(/\{\{fullName\}\}/g, 'John Doe')
-              }}
-            />
-          )}
-
           {viewMode === 'code' && (
             <div className="form-group">
-              <label className="form-label">HTML Source</label>
+              <label className="form-label">HTML Source Code</label>
               <textarea
                 className="form-textarea"
                 style={{ 
@@ -341,6 +320,33 @@ function Composer() {
                 }}
                 value={campaign.content}
                 onChange={(e) => setCampaign({ ...campaign, content: e.target.value })}
+                placeholder="<html>&#10;<body>&#10;  <h1>Hello {{firstName}}!</h1>&#10;</body>&#10;</html>"
+              />
+            </div>
+          )}
+
+          {viewMode === 'preview' && (
+            <div className="form-group">
+              <label className="form-label">Email Preview</label>
+              <div 
+                className="preview-content"
+                style={{ 
+                  minHeight: '400px', 
+                  border: '1px solid var(--border)', 
+                  borderRadius: '8px',
+                  padding: '20px',
+                  background: '#ffffff',
+                  color: '#000000',
+                  overflow: 'auto'
+                }}
+                dangerouslySetInnerHTML={{ 
+                  __html: campaign.content
+                    .replace(/\{\{firstName\}\}/g, 'John')
+                    .replace(/\{\{lastName\}\}/g, 'Doe')
+                    .replace(/\{\{email\}\}/g, 'john@example.com')
+                    .replace(/\{\{fullName\}\}/g, 'John Doe')
+                    .replace(/\{\{company\}\}/g, 'Acme Inc')
+                }}
               />
             </div>
           )}

@@ -1,55 +1,45 @@
 # 📧 Bulky Email Sender
 
-<p align="center">
-  <img src="assets/icon.ico" alt="Bulky Logo" width="128"/>
-</p>
+**Professional Bulk Email Solution - No Subscriptions, No Limits**
 
-<p align="center">
-  <strong>Professional Bulk Email Solution - No Subscriptions, No Limits</strong>
-</p>
+Bulky is a powerful desktop application for sending bulk emails without the recurring costs of SaaS platforms. Built as a modern alternative to SendBlaster, it offers a clean interface and advanced features for email marketers.
 
-<p align="center">
-  <img src="https://img.shields.io/badge/version-2.0.0-blue.svg" alt="Version"/>
-  <img src="https://img.shields.io/badge/platform-Windows-lightgrey.svg" alt="Platform"/>
-  <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License"/>
-</p>
-
----
+![Bulky Email Sender](https://img.shields.io/badge/version-3.0.0-blue)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
+![License](https://img.shields.io/badge/license-MIT-green)
 
 ## ✨ Features
 
-- **📬 Bulk Email Sending** - Send thousands of emails with your own SMTP server
-- **👥 Contact Management** - Import/export contacts, create lists, manage subscribers
-- **📝 Email Composer** - Rich HTML editor with live preview
-- **📋 Template System** - Save and reuse email templates
-- **✅ Email Verification** - Validate email addresses before sending
-- **🛡️ Spam Checker** - Analyze content for spam triggers before sending
-- **⚡ Batch Processing** - Configurable batch sizes with delays to avoid rate limits
-- **📊 Campaign Tracking** - Monitor sent, failed, and pending emails
-- **🌓 Light/Dark Mode** - Choose your preferred theme
+### Core Features
+- 📨 **Unlimited Email Sending** - No monthly limits or quotas
+- 📋 **Contact Management** - Import, organize, and manage contact lists
+- 🎨 **HTML Email Composer** - Rich text editor with template support
+- 📊 **Campaign Tracking** - Monitor sent, failed, opened, and clicked emails
+- ✅ **Email Verification** - Validate emails before sending
+- 🛡️ **Spam Checker** - Analyze content for spam triggers
 
----
-
-## 📸 Screenshots
-
-*Screenshots coming soon*
-
----
+### New in v3.0
+- 🪄 **Spam Auto-Fix** - One-click fixes for spam trigger words
+- 📥 **Multi-Format Import** - CSV, Excel, JSON, TXT support with smart parsing
+- 🏷️ **Contact Tags & Filters** - Organize with tags, search, and filter
+- 🔄 **Smart Verification Workflow** - Delete invalid, export valid, add to blacklist
+- 🚫 **Blacklist Management** - Block emails/domains, auto-block bounces
+- 📧 **SMTP Rotation** - Multiple accounts with daily limits and load balancing
+- 📈 **Advanced Personalization** - Conditionals, fallbacks, custom fields
+- 📊 **Enhanced Analytics** - Open tracking, click tracking, engagement scores
 
 ## 🚀 Installation
 
-### Option 1: Download Installer (Recommended)
-1. Go to [Releases](https://github.com/biyapod-create/Bulky/releases)
-2. Download `Bulky Email Sender Setup.exe`
-3. Run the installer and follow the prompts
+### Option 1: Download Installer
+Download the latest release from the [Releases](https://github.com/biyapod-create/Bulky/releases) page.
 
 ### Option 2: Build from Source
 ```bash
-# Clone the repository
+# Clone repository
 git clone https://github.com/biyapod-create/Bulky.git
 cd Bulky
 
-# Install dependencies
+# Install dependencies (both root and renderer)
 npm install
 cd renderer && npm install && cd ..
 
@@ -60,138 +50,131 @@ npm run dev
 npm run build
 ```
 
----
+## 📧 SMTP Configuration
 
-## ⚙️ Configuration
+Configure your SMTP server in Settings. Common providers:
 
-### SMTP Setup
-
-Bulky works with any SMTP server. Here are common configurations:
-
-| Provider | Host | Port | SSL/TLS |
-|----------|------|------|---------|
-| cPanel/Webmail | mail.yourdomain.com | 587 | No |
+| Provider | Host | Port | Secure |
+|----------|------|------|--------|
+| cPanel Webmail | mail.yourdomain.com | 465 | Yes |
 | Gmail | smtp.gmail.com | 587 | No |
-| Outlook | smtp-mail.outlook.com | 587 | No |
-| Custom | Your SMTP server | 587/465 | Depends |
+| Outlook | smtp.office365.com | 587 | No |
+| SendGrid | smtp.sendgrid.net | 587 | No |
+| Mailgun | smtp.mailgun.org | 587 | No |
 
-> **Note:** For Gmail, you'll need to use an [App Password](https://support.google.com/accounts/answer/185833)
 
-### Deliverability Settings (Optional)
+## 📝 Personalization Tokens
 
-To improve inbox delivery rates:
-- **Reply-To Email** - Where replies should go
-- **Unsubscribe Email/URL** - Adds List-Unsubscribe header (recommended for bulk sending)
+Use these placeholders in your emails for personalization:
 
----
+### Basic Tokens
+| Token | Description |
+|-------|-------------|
+| `{{firstName}}` | Contact's first name |
+| `{{lastName}}` | Contact's last name |
+| `{{fullName}}` | First + Last name |
+| `{{email}}` | Email address |
+| `{{company}}` | Company name |
+| `{{phone}}` | Phone number |
+| `{{customField1}}` | Custom field 1 |
+| `{{customField2}}` | Custom field 2 |
 
-## 📖 Usage Guide
+### Date/Time Tokens
+| Token | Description |
+|-------|-------------|
+| `{{date}}` | Current date |
+| `{{year}}` | Current year |
+| `{{month}}` | Current month name |
+| `{{dayOfWeek}}` | Day of week |
 
-### 1. Configure SMTP
-Go to **Settings** → Enter your SMTP server details → **Test Connection**
+### Advanced Tokens
+| Token | Description |
+|-------|-------------|
+| `{{firstName \| "Friend"}}` | Fallback if empty |
+| `{{firstName:upper}}` | UPPERCASE |
+| `{{firstName:capitalize}}` | Capitalize |
+| `{{uniqueCode}}` | Random unique code |
 
-### 2. Add Contacts
-Go to **Contacts** → **Import CSV** or add manually
-
-### 3. Create Campaign
-Go to **Campaigns** → **New Campaign** → Select list → Configure batch settings
-
-### 4. Compose Email
-Use the **Composer** to write your email with the rich text editor
-
-### 5. Send!
-Start your campaign and monitor progress in real-time
-
----
+### Conditional Content
+```html
+{{#if company}}
+Thanks for representing {{company}}!
+{{else}}
+Thanks for joining us!
+{{/if}}
+```
 
 ## 🛡️ Spam Prevention Tips
 
-1. **Set up SPF/DKIM** - Configure DNS records with your domain host
-2. **Use descriptive subjects** - Avoid "Test" or spammy words
-3. **Add unsubscribe option** - Required by Gmail for bulk senders
-4. **Avoid spam triggers** - FREE, URGENT, ALL CAPS, excessive punctuation
-5. **Warm up gradually** - Start with small batches (10-20/day)
-6. **Use your own domain** - Avoid sending from gmail.com or yahoo.com
+1. **Avoid spam trigger words**: FREE, URGENT, BUY NOW, CLICK HERE
+2. **Keep subject lines under 50 characters**
+3. **Maintain 80/20 text-to-image ratio**
+4. **Include unsubscribe link** (required for bulk sending)
+5. **Use List-Unsubscribe header** (Settings > Deliverability)
+6. **Verify emails before sending** to reduce bounce rate
+7. **Warm up new SMTP accounts** gradually
 
----
-
-## 🏗️ Tech Stack
+## 🔧 Tech Stack
 
 - **Electron** - Cross-platform desktop framework
-- **React** - Frontend UI
-- **SQLite** - Local database (sql.js)
-- **Nodemailer** - Email sending
-- **Lucide React** - Icons
-
----
+- **React** - Modern UI library
+- **SQLite (sql.js)** - Local database
+- **Nodemailer** - Email sending engine
 
 ## 📁 Project Structure
 
 ```
 Bulky/
 ├── main.js              # Electron main process
-├── preload.js           # Context bridge for IPC
-├── package.json         # Dependencies & build config
+├── preload.js           # Context bridge
 ├── database/
-│   └── db.js            # SQLite database operations
+│   └── db.js            # SQLite database
 ├── services/
-│   ├── emailService.js  # Email sending logic
-│   ├── verificationService.js  # Email validation
-│   └── spamService.js   # Spam checking
+│   ├── emailService.js  # Email sending & tracking
+│   ├── verificationService.js
+│   └── spamService.js   # Spam check & auto-fix
 ├── renderer/
-│   └── src/
-│       ├── pages/       # React page components
-│       ├── components/  # Reusable UI components
-│       └── index.css    # Styles
+│   ├── src/
+│   │   ├── pages/       # React pages
+│   │   ├── components/  # Reusable components
+│   │   └── App.js
+│   └── public/
 └── assets/
-    ├── icon.ico         # App icon
-    └── license.txt      # License file
 ```
 
----
+## 📜 Changelog
 
-## 📝 Changelog
+### v3.0.0 (Latest)
+- ✨ Spam auto-fix with word replacements
+- ✨ Multi-format contact import (CSV, Excel, JSON, TXT)
+- ✨ Contact tags, filters, and bulk actions
+- ✨ Smart verification workflow
+- ✨ Blacklist & unsubscribe management
+- ✨ SMTP rotation with daily limits
+- ✨ Advanced personalization (conditionals, fallbacks)
+- ✨ Enhanced dashboard with new metrics
 
-### v2.0.0 (Current)
-- ✅ Added spam deliverability improvements (plain text + HTML)
-- ✅ Added List-Unsubscribe header support
-- ✅ Added Reply-To email configuration
-- ✅ Fixed Spam Checker page styling
-- ✅ Light mode now default
-- ✅ Logo aligned to left in sidebar
-- ✅ Code cleanup and optimizations
+### v2.0.0
+- Complete UI redesign with light/dark themes
+- Improved spam checker
+- Better deliverability headers
+- Email verification system
 
 ### v1.0.0
-- 🎉 Initial release
-- Email composer with HTML editor
-- Contact management with CSV import
-- Campaign system with batch processing
-- Email verification
-- Spam checker
+- Initial release
+- Basic email sending
+- Contact management
 - Template system
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Feel free to:
-- Report bugs
-- Suggest features
-- Submit pull requests
-
----
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
+MIT License - see [LICENSE](LICENSE) file.
 
 ## 👤 Author
 
-**Allen Daniel (AllenRetro)**
+**Allen Daniel** (AllenRetro)
 - GitHub: [@biyapod-create](https://github.com/biyapod-create)
 
 ---
 
-<p align="center">Made with ❤️ by AllenRetro</p>
+Made with ❤️ for email marketers who want freedom from subscriptions.

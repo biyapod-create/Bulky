@@ -8,11 +8,12 @@ import {
   FileText, 
   CheckCircle, 
   ShieldAlert, 
+  Ban,
   Settings,
   Mail
 } from 'lucide-react';
 
-// Menu order: Dashboard, Campaign, Composer, Contact, Template, Verify Emails, Spam Checker, Settings
+// Menu order: Dashboard, Campaign, Composer, Contact, Template, Verify Emails, Spam Checker, Blacklist, Settings
 const navItems = [
   { path: '/', icon: LayoutDashboard, label: 'Dashboard' },
   { path: '/campaigns', icon: Send, label: 'Campaigns' },
@@ -21,6 +22,7 @@ const navItems = [
   { path: '/templates', icon: FileText, label: 'Templates' },
   { path: '/verify', icon: CheckCircle, label: 'Verify Emails' },
   { path: '/spam-checker', icon: ShieldAlert, label: 'Spam Checker' },
+  { path: '/blacklist', icon: Ban, label: 'Blacklist' },
   { path: '/settings', icon: Settings, label: 'Settings' },
 ];
 
