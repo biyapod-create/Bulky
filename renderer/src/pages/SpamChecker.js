@@ -172,10 +172,10 @@ function SpamChecker() {
       </div>
 
       {/* Main Grid: Editor + Preview */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', overflow: 'hidden' }}>
         
         {/* Left: Editor */}
-        <div className="card">
+        <div className="card" style={{ overflow: 'hidden' }}>
           <h3 className="card-title mb-4"><Code size={18} /> Email Editor</h3>
           
           <div className="form-group">
@@ -197,7 +197,12 @@ function SpamChecker() {
               onChange={(e) => setContent(e.target.value)} 
               placeholder="<h1>Hello {{firstName}}!</h1>&#10;<p>Your email content here...</p>"
               rows={14}
-              style={{ fontFamily: 'monospace', fontSize: '13px' }}
+              style={{ 
+                fontFamily: 'monospace', 
+                fontSize: '13px',
+                wordBreak: 'break-all',
+                overflowWrap: 'break-word'
+              }}
             />
           </div>
           
@@ -212,7 +217,7 @@ function SpamChecker() {
         </div>
 
         {/* Right: Preview */}
-        <div className="card">
+        <div className="card" style={{ overflow: 'hidden' }}>
           <div className="flex justify-between items-center mb-4">
             <h3 className="card-title" style={{ margin: 0 }}><Eye size={18} /> Preview</h3>
             <div className="flex gap-2">
@@ -252,7 +257,8 @@ function SpamChecker() {
             minHeight: '320px',
             maxHeight: '400px',
             overflow: 'hidden',
-            background: '#fff'
+            background: '#fff',
+            boxSizing: 'border-box'
           }}>
             {content ? (
               showPreview ? (
@@ -276,13 +282,16 @@ function SpamChecker() {
                 <pre style={{ 
                   margin: 0, 
                   padding: '16px', 
-                  whiteSpace: 'pre-wrap', 
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-all',
+                  overflowWrap: 'break-word',
                   fontFamily: 'monospace', 
                   fontSize: '12px',
                   background: 'var(--bg-secondary)',
                   color: 'var(--text)',
                   height: '320px',
-                  overflow: 'auto'
+                  overflow: 'auto',
+                  boxSizing: 'border-box'
                 }}>
                   {content}
                 </pre>
