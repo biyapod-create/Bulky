@@ -275,6 +275,7 @@ body {
   display: flex;
   gap: 4px;
   flex-wrap: wrap;
+  margin-bottom: 16px;
 }
 
 .tab {
@@ -298,9 +299,14 @@ body {
 }
 
 .tab.active {
-  background: var(--accent);
-  color: #fff;
-  border-color: var(--accent);
+  background: var(--accent) !important;
+  color: #ffffff !important;
+  border-color: var(--accent) !important;
+}
+
+.tab.active:hover {
+  background: var(--accent-hover) !important;
+  color: #ffffff !important;
 }
 
 /* Stats Grid - Responsive */
