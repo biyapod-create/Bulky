@@ -140,13 +140,26 @@ body {
 
 /* Sidebar */
 .sidebar {
-  width: 220px;
-  min-width: 220px;
+  width: 240px;
+  min-width: 200px;
+  max-width: 280px;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   padding: 16px 0;
+}
+
+@media (min-width: 1600px) {
+  .sidebar {
+    width: 260px;
+  }
+}
+
+@media (max-width: 1200px) {
+  .sidebar {
+    width: 220px;
+  }
 }
 
 .sidebar-logo {
@@ -166,14 +179,14 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 14px;
+  padding: 12px 16px;
   color: var(--text-secondary);
   text-decoration: none;
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.15s;
-  margin-bottom: 2px;
-  font-size: 13px;
+  margin-bottom: 4px;
+  font-size: 14px;
 }
 
 .nav-item:hover {
@@ -255,6 +268,39 @@ body {
   font-size: 16px;
   font-weight: 600;
   color: var(--text-primary);
+}
+
+/* Tabs */
+.tabs {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.tab {
+  padding: 10px 18px;
+  border: 1px solid var(--border);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.15s;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.tab.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
 }
 
 /* Stats Grid - Responsive */

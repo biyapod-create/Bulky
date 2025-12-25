@@ -157,7 +157,31 @@ ipcMain.handle('contacts:import', async () => {
         return cols;
       };
 
-      const isDateColumn = (h) => ['date','time','created','updated','modified','timestamp','_at'].some(p => h.includes(p));
+      // Check if header is a date/time column (to skip for name/company fields)
+      const isDateColumn = (h) => {
+        const datePatterns = ['date', 'time', 'created', 'updated', 'modified', 'timestamp', '_at', 'registered', 'joined', 'added', 'subscribed'];
+        return datePatterns.some(p => h.includes(p));
+      };
+      
+      // Check if a value looks like a timestamp/date
+      const isDateValue = (val) => {
+        if (!val) return false;
+        // ISO date pattern: 2025-12-12T20:37:17 or similar
+        if (/^\d{4}-\d{2}-\d{2}/.test(val)) return true;
+        // Other common date formats
+        if (/^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(val)) return true;
+        if (/^\d{1,2}-\d{1,2}-\d{2,4}/.test(val)) return true;
+        return false;
+      };
+      
+      // Clean value - return empty string if it's a date/timestamp
+      const cleanValue = (val) => {
+        if (!val) return '';
+        const trimmed = val.trim();
+        if (isDateValue(trimmed)) return '';
+        return trimmed;
+      };
+
       const findColumnIndex = (headers, patterns) => headers.findIndex(h => patterns.some(p => h.includes(p)) && !isDateColumn(h));
 
       // CSV / TXT files
@@ -183,10 +207,10 @@ ipcMain.handle('contacts:import', async () => {
             if (email && email.includes('@') && !email.includes(' ')) {
               parsed.push({
                 email,
-                firstName: fnameIdx >= 0 ? (cols[fnameIdx] || '').trim() : '',
-                lastName: lnameIdx >= 0 ? (cols[lnameIdx] || '').trim() : '',
-                company: companyIdx >= 0 ? (cols[companyIdx] || '').trim() : '',
-                phone: phoneIdx >= 0 ? (cols[phoneIdx] || '').trim() : ''
+                firstName: fnameIdx >= 0 ? cleanValue(cols[fnameIdx]) : '',
+                lastName: lnameIdx >= 0 ? cleanValue(cols[lnameIdx]) : '',
+                company: companyIdx >= 0 ? cleanValue(cols[companyIdx]) : '',
+                phone: phoneIdx >= 0 ? cleanValue(cols[phoneIdx]) : ''
               });
             }
           }
@@ -229,10 +253,10 @@ ipcMain.handle('contacts:import', async () => {
             if (email && email.includes('@') && !email.includes(' ')) {
               parsed.push({
                 email,
-                firstName: fnameIdx >= 0 ? String(row[fnameIdx] || '').trim() : '',
-                lastName: lnameIdx >= 0 ? String(row[lnameIdx] || '').trim() : '',
-                company: companyIdx >= 0 ? String(row[companyIdx] || '').trim() : '',
-                phone: phoneIdx >= 0 ? String(row[phoneIdx] || '').trim() : ''
+                firstName: fnameIdx >= 0 ? cleanValue(String(row[fnameIdx] || '')) : '',
+                lastName: lnameIdx >= 0 ? cleanValue(String(row[lnameIdx] || '')) : '',
+                company: companyIdx >= 0 ? cleanValue(String(row[companyIdx] || '')) : '',
+                phone: phoneIdx >= 0 ? cleanValue(String(row[phoneIdx] || '')) : ''
               });
             }
           }

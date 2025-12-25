@@ -228,11 +228,13 @@ function Contacts() {
           <p className="page-subtitle">Manage your email contacts and lists.</p>
         </div>
         <div className="flex gap-2">
-          <div style={{ position: 'relative' }}>
-            <button className="btn btn-outline" onClick={handleImport} title="Supported: CSV, TXT, Excel, JSON"><Upload size={16} /> Import</button>
-            <span className="text-xs text-muted" style={{ position: 'absolute', bottom: '-18px', left: '0', whiteSpace: 'nowrap', fontSize: '10px' }}>CSV, TXT, XLSX, JSON</span>
-          </div>
-          <button className="btn btn-outline" onClick={handleExport}><Download size={16} /> Export</button>
+          <button className="btn btn-outline" onClick={handleImport} title="Import contacts from CSV, TXT, Excel, JSON, PDF, Word">
+            <Download size={16} /> Import
+          </button>
+          <span className="text-xs text-muted" style={{ alignSelf: 'center', marginLeft: '-8px', marginRight: '8px' }}>CSV, XLSX, JSON, PDF</span>
+          <button className="btn btn-outline" onClick={handleExport} title="Export contacts to CSV">
+            <Upload size={16} /> Export
+          </button>
           <button className="btn btn-primary" onClick={() => handleOpenModal()}><Plus size={16} /> Add Contact</button>
         </div>
       </div>

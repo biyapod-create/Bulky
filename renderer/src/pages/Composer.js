@@ -261,26 +261,29 @@ function Composer() {
         </div>
 
         {/* Right Panel - Editor */}
-        <div className="card">
+        <div className="card" style={{ overflow: 'hidden' }}>
           <div className="flex justify-between items-center mb-4">
-            <div className="tabs" style={{ marginBottom: 0, borderBottom: 'none' }}>
+            <div className="tabs" style={{ marginBottom: 0, borderBottom: 'none', display: 'flex', gap: '4px' }}>
               <button 
                 className={`tab ${viewMode === 'visual' ? 'active' : ''}`}
                 onClick={() => setViewMode('visual')}
+                style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', gap: '6px' }}
               >
-                <Edit3 size={14} style={{ marginRight: '4px' }} /> Visual
+                <Edit3 size={14} /> Visual
               </button>
               <button 
                 className={`tab ${viewMode === 'code' ? 'active' : ''}`}
                 onClick={() => setViewMode('code')}
+                style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', gap: '6px' }}
               >
-                <Code size={14} style={{ marginRight: '4px' }} /> HTML
+                <Code size={14} /> HTML
               </button>
               <button 
                 className={`tab ${viewMode === 'preview' ? 'active' : ''}`}
                 onClick={() => setViewMode('preview')}
+                style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', gap: '6px' }}
               >
-                <Eye size={14} style={{ marginRight: '4px' }} /> Preview
+                <Eye size={14} /> Preview
               </button>
             </div>
           </div>
