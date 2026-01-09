@@ -4,11 +4,35 @@ const crypto = require('crypto');
 class EmailService {
   constructor(db) {
     this.db = db;
-    this.transporters = new Map(); // Multiple SMTP accounts
+    this.transporters = new Map();
     this.isPaused = false;
     this.isStopped = false;
     this.currentCampaignId = null;
     this.currentSmtpIndex = 0;
+
+    // SMTP response codes and their meanings
+    this.smtpResponseCodes = {
+      // Success codes
+      250: { type: 'success', category: 'sent', message: 'Message accepted' },
+      251: { type: 'success', category: 'sent', message: 'User not local, will forward' },
+      
+      // Temporary failures (soft bounces - retry)
+      421: { type: 'soft_bounce', category: 'temporary', message: 'Service unavailable, try again later' },
+      450: { type: 'soft_bounce', category: 'temporary', message: 'Mailbox busy or temporarily blocked' },
+      451: { type: 'soft_bounce', category: 'temporary', message: 'Local error in processing' },
+      452: { type: 'soft_bounce', category: 'temporary', message: 'Insufficient system storage' },
+      
+      // Permanent failures (hard bounces - don't retry)
+      550: { type: 'hard_bounce', category: 'invalid_recipient', message: 'User not found / Mailbox unavailable' },
+      551: { type: 'hard_bounce', category: 'invalid_recipient', message: 'User not local' },
+      552: { type: 'soft_bounce', category: 'mailbox_full', message: 'Mailbox storage exceeded' },
+      553: { type: 'hard_bounce', category: 'invalid_address', message: 'Mailbox name not allowed' },
+      554: { type: 'hard_bounce', category: 'rejected', message: 'Transaction failed / Message rejected' },
+      
+      // Policy/security rejections
+      571: { type: 'hard_bounce', category: 'blocked', message: 'Message refused by policy' },
+      572: { type: 'hard_bounce', category: 'blocked', message: 'Spam message rejected' }
+    };
   }
 
   createTransporter(settings) {
@@ -37,14 +61,81 @@ class EmailService {
     }
   }
 
-  // Generate tracking ID for opens/clicks
   generateTrackingId() {
     return crypto.randomBytes(16).toString('hex');
+  }
+
+  // Parse SMTP error to extract code and determine bounce type
+  parseSmtpError(error) {
+    const errorString = error.message || error.toString();
+    
+    // Try to extract SMTP code from error message
+    const codeMatch = errorString.match(/\b([245]\d{2})\b/);
+    const smtpCode = codeMatch ? parseInt(codeMatch[1], 10) : null;
+    
+    // Get code info or default
+    const codeInfo = smtpCode ? this.smtpResponseCodes[smtpCode] : null;
+    
+    // Determine failure type based on error content
+    let failureType = 'unknown';
+    let failureReason = errorString;
+    
+    if (codeInfo) {
+      failureType = codeInfo.type;
+      failureReason = codeInfo.message;
+    } else {
+      // Parse common error patterns
+      const errorLower = errorString.toLowerCase();
+      
+      if (errorLower.includes('user unknown') || errorLower.includes('user not found') || 
+          errorLower.includes('does not exist') || errorLower.includes('no such user') ||
+          errorLower.includes('invalid recipient') || errorLower.includes('recipient rejected')) {
+        failureType = 'hard_bounce';
+        failureReason = 'Recipient does not exist';
+      } else if (errorLower.includes('mailbox full') || errorLower.includes('over quota') ||
+                 errorLower.includes('storage exceeded')) {
+        failureType = 'soft_bounce';
+        failureReason = 'Mailbox full';
+      } else if (errorLower.includes('blocked') || errorLower.includes('blacklisted') ||
+                 errorLower.includes('rejected') || errorLower.includes('denied')) {
+        failureType = 'hard_bounce';
+        failureReason = 'Message blocked or rejected';
+      } else if (errorLower.includes('timeout') || errorLower.includes('timed out')) {
+        failureType = 'soft_bounce';
+        failureReason = 'Connection timeout';
+      } else if (errorLower.includes('connection') || errorLower.includes('socket')) {
+        failureType = 'soft_bounce';
+        failureReason = 'Connection error';
+      } else if (errorLower.includes('spam') || errorLower.includes('spf') || 
+                 errorLower.includes('dkim') || errorLower.includes('dmarc')) {
+        failureType = 'hard_bounce';
+        failureReason = 'Rejected as spam or authentication failure';
+      }
+    }
+    
+    return {
+      smtpCode,
+      smtpResponse: errorString.substring(0, 500), // Limit length
+      failureType,
+      failureReason
+    };
+  }
+
+  // Process spintax: {option1|option2|option3} -> randomly picks one
+  processSpintax(text) {
+    if (!text) return text;
+    return text.replace(/\{([^{}]+)\}/g, (match, options) => {
+      const choices = options.split('|');
+      return choices[Math.floor(Math.random() * choices.length)];
+    });
   }
 
   // Advanced personalization with conditionals and fallbacks
   personalizeContent(content, contact, campaign = null) {
     let personalized = content;
+    
+    // Process spintax FIRST (before other replacements)
+    personalized = this.processSpintax(personalized);
     
     // Basic fields
     personalized = personalized.replace(/\{\{email\}\}/gi, contact.email || '');
@@ -78,7 +169,6 @@ class EmailService {
     personalized = personalized.replace(/\{\{randomNumber\}\}/gi, () => Math.floor(Math.random() * 10000).toString());
     personalized = personalized.replace(/\{\{uniqueCode\}\}/gi, () => crypto.randomBytes(4).toString('hex').toUpperCase());
 
-
     // Fallback syntax: {{firstName | "Friend"}} or {{firstName | Friend}}
     personalized = personalized.replace(/\{\{(\w+)\s*\|\s*"?([^}"]+)"?\}\}/gi, (match, field, fallback) => {
       const fieldLower = field.toLowerCase();
@@ -107,7 +197,7 @@ class EmailService {
       return (!value || !value.trim()) ? content : '';
     });
 
-    // Uppercase/Lowercase modifiers: {{firstName:upper}} {{lastName:lower}} {{company:capitalize}}
+    // Uppercase/Lowercase modifiers
     personalized = personalized.replace(/\{\{(\w+):upper\}\}/gi, (match, field) => {
       const value = contact[field.toLowerCase()] || contact[field] || '';
       return value.toUpperCase();
@@ -130,7 +220,6 @@ class EmailService {
     return personalized;
   }
 
-  // Strip HTML tags for plain text version
   htmlToPlainText(html) {
     return html
       .replace(/<br\s*\/?>/gi, '\n')
@@ -150,64 +239,66 @@ class EmailService {
       .trim();
   }
 
-  // Generate unique Message-ID
   generateMessageId(domain) {
     const timestamp = Date.now();
     const random = crypto.randomBytes(8).toString('hex');
     return `<${timestamp}.${random}@${domain}>`;
   }
 
-  // Add tracking pixel for open tracking
-  addOpenTracking(html, trackingId, campaignId) {
-    const trackingPixel = `<img src="{{trackingDomain}}/track/open/${campaignId}/${trackingId}" width="1" height="1" style="display:none;" alt="" />`;
-    
-    // Insert before </body> or at end
-    if (html.includes('</body>')) {
-      return html.replace('</body>', `${trackingPixel}</body>`);
+  // Tracking server base URL
+  getTrackingBaseUrl() {
+    return 'http://127.0.0.1:3847';
+  }
+
+  addOpenTracking(html, trackingId, campaignId, contactId) {
+    const trackingUrl = `${this.getTrackingBaseUrl()}/track/open/${campaignId}/${contactId || 'unknown'}/${trackingId}`;
+    const trackingPixel = `<img src="${trackingUrl}" width="1" height="1" style="display:none;width:1px;height:1px;border:0;" alt="" />`;
+    if (html.toLowerCase().includes('</body>')) {
+      return html.replace(/<\/body>/i, `${trackingPixel}</body>`);
     }
     return html + trackingPixel;
   }
 
-  // Wrap links for click tracking
-  addClickTracking(html, trackingId, campaignId) {
+  addClickTracking(html, trackingId, campaignId, contactId) {
+    const baseUrl = this.getTrackingBaseUrl();
     return html.replace(/<a\s+([^>]*href=")([^"]+)(")/gi, (match, before, url, after) => {
-      // Skip mailto: and tel: links
-      if (url.startsWith('mailto:') || url.startsWith('tel:') || url.includes('unsubscribe')) {
+      // Skip certain links
+      if (url.startsWith('mailto:') || url.startsWith('tel:') || url.startsWith('#') ||
+          url.toLowerCase().includes('unsubscribe') || url.toLowerCase().includes('optout')) {
         return match;
       }
       const encodedUrl = encodeURIComponent(url);
-      const trackedUrl = `{{trackingDomain}}/track/click/${campaignId}/${trackingId}?url=${encodedUrl}`;
+      const trackedUrl = `${baseUrl}/track/click/${campaignId}/${contactId || 'unknown'}/${trackingId}?url=${encodedUrl}`;
       return `<a ${before}${trackedUrl}${after}`;
     });
   }
 
+  addUnsubscribeLink(html, campaignId, contactId, email) {
+    const unsubUrl = `${this.getTrackingBaseUrl()}/unsubscribe/${campaignId}/${contactId || 'unknown'}?email=${encodeURIComponent(email)}`;
+    let processed = html.replace(/\{\{unsubscribeLink\}\}/gi, unsubUrl);
+    processed = processed.replace(/\{\{unsubscribeUrl\}\}/gi, unsubUrl);
+    return processed;
+  }
 
-  // Get next available SMTP account (rotation)
   async getNextSmtpAccount() {
     try {
       const accounts = this.db.getActiveSmtpAccounts();
-      if (!accounts || accounts.length === 0) {
-        return null;
-      }
+      if (!accounts || accounts.length === 0) return null;
       
-      // Simple round-robin with daily limit check
       for (let i = 0; i < accounts.length; i++) {
         const idx = (this.currentSmtpIndex + i) % accounts.length;
         const account = accounts[idx];
-        
         if (account.sentToday < account.dailyLimit) {
           this.currentSmtpIndex = (idx + 1) % accounts.length;
           return account;
         }
       }
-      
-      return null; // All accounts at limit
+      return null;
     } catch (e) {
       return null;
     }
   }
 
-  // Get or create transporter for account
   getTransporter(account) {
     if (!this.transporters.has(account.id)) {
       this.transporters.set(account.id, this.createTransporter(account));
@@ -215,24 +306,34 @@ class EmailService {
     return this.transporters.get(account.id);
   }
 
+  sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  getRandomDelay(baseMs) {
+    const variance = baseMs * 0.25;
+    return baseMs + (Math.random() * variance * 2 - variance);
+  }
+
   async sendSingleEmail(transporter, settings, contact, subject, content, campaign = null, variant = 'A') {
     const personalizedSubject = this.personalizeContent(subject, contact, campaign);
     let personalizedContent = this.personalizeContent(content, contact, campaign);
     
-    // Add tracking if enabled
     const trackingId = this.generateTrackingId();
+    const contactId = contact.id || 'unknown';
+    
     if (campaign && campaign.id) {
-      // Note: In production, replace {{trackingDomain}} with actual domain
-      personalizedContent = this.addOpenTracking(personalizedContent, trackingId, campaign.id);
-      personalizedContent = this.addClickTracking(personalizedContent, trackingId, campaign.id);
+      // Add tracking with contact ID for accurate attribution
+      personalizedContent = this.addOpenTracking(personalizedContent, trackingId, campaign.id, contactId);
+      personalizedContent = this.addClickTracking(personalizedContent, trackingId, campaign.id, contactId);
+      personalizedContent = this.addUnsubscribeLink(personalizedContent, campaign.id, contactId, contact.email);
     }
     
     const plainTextContent = this.htmlToPlainText(personalizedContent);
     const domain = settings.fromEmail.split('@')[1] || 'localhost';
     
-    // Headers for deliverability
     const headers = {
-      'X-Mailer': 'Bulky Email Sender v3.0',
+      'X-Mailer': 'Bulky Email Sender v3.2',
       'Message-ID': this.generateMessageId(domain),
       'X-Priority': '3',
       'Precedence': 'bulk',
@@ -240,13 +341,13 @@ class EmailService {
       'X-Tracking-ID': trackingId
     };
     
-    // List-Unsubscribe header (required by Gmail for bulk)
-    if (settings.unsubscribeEmail) {
-      headers['List-Unsubscribe'] = `<mailto:${settings.unsubscribeEmail}?subject=Unsubscribe>`;
+    // Add List-Unsubscribe header for Gmail/email clients
+    const unsubUrl = campaign ? `${this.getTrackingBaseUrl()}/unsubscribe/${campaign.id}/${contactId}?email=${encodeURIComponent(contact.email)}` : null;
+    if (unsubUrl) {
+      headers['List-Unsubscribe'] = `<${unsubUrl}>`;
       headers['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
-    } else if (settings.unsubscribeUrl) {
-      const unsub = `${settings.unsubscribeUrl}?email=${encodeURIComponent(contact.email)}`;
-      headers['List-Unsubscribe'] = `<${unsub}>`;
+    } else if (settings.unsubscribeEmail) {
+      headers['List-Unsubscribe'] = `<mailto:${settings.unsubscribeEmail}?subject=Unsubscribe>`;
       headers['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
     }
 
@@ -261,32 +362,40 @@ class EmailService {
     };
 
     const result = await transporter.sendMail(mailOptions);
-    return { ...result, trackingId, variant };
+    return { 
+      ...result, 
+      trackingId, 
+      variant,
+      smtpCode: 250,
+      smtpResponse: result.response || 'Message accepted',
+      status: 'sent'
+    };
   }
-
-  sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  getRandomDelay(baseMs) {
-    const variance = baseMs * 0.25;
-    return baseMs + (Math.random() * variance * 2 - variance);
-  }
-
 
   async sendCampaign(campaign, contacts, smtpSettings, onProgress) {
     this.isPaused = false;
     this.isStopped = false;
     this.currentCampaignId = campaign.id;
 
-    // Check for blacklisted/unsubscribed contacts
+    // Filter out blacklisted, unsubscribed, and previously bounced contacts
     const validContacts = [];
+    const skippedReasons = { blacklisted: 0, unsubscribed: 0, bounced: 0 };
+    
     for (const contact of contacts) {
-      const isBlacklisted = this.db.isBlacklisted(contact.email);
-      const isUnsubscribed = this.db.isUnsubscribed(contact.email);
-      if (!isBlacklisted && !isUnsubscribed) {
-        validContacts.push(contact);
+      if (this.db.isBlacklisted(contact.email)) {
+        skippedReasons.blacklisted++;
+        continue;
       }
+      if (this.db.isUnsubscribed(contact.email)) {
+        skippedReasons.unsubscribed++;
+        continue;
+      }
+      // Skip contacts that have hard bounced before
+      if (contact.bounceCount >= 2) {
+        skippedReasons.bounced++;
+        continue;
+      }
+      validContacts.push(contact);
     }
 
     const transporter = this.createTransporter(smtpSettings);
@@ -297,6 +406,7 @@ class EmailService {
 
     let sentCount = 0;
     let failedCount = 0;
+    let bouncedCount = 0;
     const totalContacts = validContacts.length;
     const skippedCount = contacts.length - validContacts.length;
 
@@ -320,7 +430,9 @@ class EmailService {
       total: totalContacts,
       sent: 0,
       failed: 0,
+      bounced: 0,
       skipped: skippedCount,
+      skippedReasons,
       currentBatch: 1,
       totalBatches: Math.ceil(totalContacts / batchSize)
     });
@@ -355,8 +467,16 @@ class EmailService {
           }
         }
 
+        // Send email and handle result
+        let sendResult = {
+          status: 'pending',
+          smtpCode: null,
+          smtpResponse: null,
+          failureType: null,
+          failureReason: null
+        };
+
         try {
-          // Try to get rotating SMTP account first
           let activeTransporter = transporter;
           let activeSettings = smtpSettings;
           
@@ -367,38 +487,68 @@ class EmailService {
             this.db.incrementSmtpSentCount(rotatingAccount.id);
           }
 
-          await this.sendSingleEmail(activeTransporter, activeSettings, contact, subject, content, campaign, variant);
-          sentCount++;
+          const result = await this.sendSingleEmail(activeTransporter, activeSettings, contact, subject, content, campaign, variant);
           
-          this.db.addCampaignLog({
-            campaignId: campaign.id,
-            contactId: contact.id,
-            email: contact.email,
+          sentCount++;
+          sendResult = {
             status: 'sent',
-            variant
-          });
+            smtpCode: result.smtpCode || 250,
+            smtpResponse: result.smtpResponse || 'Message accepted',
+            failureType: null,
+            failureReason: null,
+            trackingId: result.trackingId
+          };
 
         } catch (error) {
-          failedCount++;
+          // Parse the error to determine bounce type
+          const errorInfo = this.parseSmtpError(error);
           
-          // Auto-blacklist hard bounces
-          if (error.message.includes('550') || error.message.includes('User unknown') || 
-              error.message.includes('does not exist') || error.message.includes('Invalid recipient')) {
-            this.db.addToBlacklist({ email: contact.email, reason: 'Hard bounce', source: 'auto' });
+          if (errorInfo.failureType === 'hard_bounce') {
+            bouncedCount++;
+            sendResult.status = 'bounced';
+            
+            // Update contact bounce count and add to blacklist after 2 hard bounces
+            this.db.incrementContactBounce(contact.id, errorInfo.failureReason);
+            if (contact.bounceCount >= 1) {
+              this.db.addToBlacklist({ 
+                email: contact.email, 
+                reason: `Hard bounce: ${errorInfo.failureReason}`, 
+                source: 'auto_bounce' 
+              });
+            }
+          } else if (errorInfo.failureType === 'soft_bounce') {
+            failedCount++;
+            sendResult.status = 'soft_bounce';
+          } else {
+            failedCount++;
+            sendResult.status = 'failed';
           }
           
-          this.db.addCampaignLog({
-            campaignId: campaign.id,
-            contactId: contact.id,
-            email: contact.email,
-            status: 'failed',
-            variant,
-            error: error.message
-          });
+          sendResult.smtpCode = errorInfo.smtpCode;
+          sendResult.smtpResponse = errorInfo.smtpResponse;
+          sendResult.failureType = errorInfo.failureType;
+          sendResult.failureReason = errorInfo.failureReason;
         }
 
+        // Log the result with full details
+        this.db.addCampaignLog({
+          campaignId: campaign.id,
+          contactId: contact.id,
+          email: contact.email,
+          status: sendResult.status,
+          variant,
+          smtpCode: sendResult.smtpCode,
+          smtpResponse: sendResult.smtpResponse,
+          failureType: sendResult.failureType,
+          failureReason: sendResult.failureReason,
+          trackingId: sendResult.trackingId,
+          error: sendResult.failureReason
+        });
+
+        // Update campaign stats
         campaign.sentEmails = sentCount;
         campaign.failedEmails = failedCount;
+        campaign.bouncedEmails = bouncedCount;
         this.db.updateCampaign(campaign);
 
         onProgress({
@@ -406,10 +556,12 @@ class EmailService {
           total: totalContacts,
           sent: sentCount,
           failed: failedCount,
+          bounced: bouncedCount,
           skipped: skippedCount,
           currentBatch,
           totalBatches,
-          currentEmail: contact.email
+          currentEmail: contact.email,
+          lastResult: sendResult
         });
 
         if (!this.isStopped) {
@@ -424,6 +576,7 @@ class EmailService {
           total: totalContacts,
           sent: sentCount,
           failed: failedCount,
+          bounced: bouncedCount,
           currentBatch,
           totalBatches,
           nextBatchIn: delayMinutes
@@ -432,11 +585,12 @@ class EmailService {
       }
     }
 
-    // Finalize
+    // Finalize campaign
     campaign.status = this.isStopped ? 'stopped' : 'completed';
     campaign.completedAt = new Date().toISOString();
     campaign.sentEmails = sentCount;
     campaign.failedEmails = failedCount;
+    campaign.bouncedEmails = bouncedCount;
     this.db.updateCampaign(campaign);
 
     onProgress({
@@ -444,7 +598,9 @@ class EmailService {
       total: totalContacts,
       sent: sentCount,
       failed: failedCount,
+      bounced: bouncedCount,
       skipped: skippedCount,
+      skippedReasons,
       currentBatch: Math.ceil(totalContacts / batchSize),
       totalBatches: Math.ceil(totalContacts / batchSize)
     });
@@ -452,7 +608,16 @@ class EmailService {
     this.currentCampaignId = null;
     this.transporters.clear();
 
-    return { success: true, status: campaign.status, sent: sentCount, failed: failedCount, total: totalContacts, skipped: skippedCount };
+    return { 
+      success: true, 
+      status: campaign.status, 
+      sent: sentCount, 
+      failed: failedCount, 
+      bounced: bouncedCount,
+      total: totalContacts, 
+      skipped: skippedCount,
+      skippedReasons
+    };
   }
 
   pause() { this.isPaused = true; return { success: true }; }

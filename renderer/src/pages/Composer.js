@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Save, Eye, Code, FileText, ShieldCheck, Edit3 } from 'lucide-react';
+import { Save, Eye, Code, FileText, ShieldCheck, Edit3, Tag, Users } from 'lucide-react';
 import { useToast } from '../components/ToastContext';
 import EmailEditor from '../components/EmailEditor';
 
@@ -12,6 +12,8 @@ function Composer() {
 
   const [templates, setTemplates] = useState([]);
   const [lists, setLists] = useState([]);
+  const [tags, setTags] = useState([]);
+  const [recipientCount, setRecipientCount] = useState(0);
   const [viewMode, setViewMode] = useState('visual'); // visual, code, preview
   const [spamScore, setSpamScore] = useState(null);
   const [campaign, setCampaign] = useState({
@@ -19,6 +21,7 @@ function Composer() {
     subject: '',
     content: getDefaultTemplate(),
     listId: campaignFromNav?.listId || '',
+    selectedTags: [],
     batchSize: campaignFromNav?.batchSize || 50,
     delayMinutes: campaignFromNav?.delayMinutes || 10,
     status: 'draft'
@@ -27,6 +30,11 @@ function Composer() {
   useEffect(() => {
     loadData();
   }, []);
+
+  // Update recipient count when filters change
+  useEffect(() => {
+    updateRecipientCount();
+  }, [campaign.listId, campaign.selectedTags]);
 
   // Debounced spam check
   useEffect(() => {
@@ -40,16 +48,43 @@ function Composer() {
   const loadData = async () => {
     try {
       if (window.electron) {
-        const [templatesData, listsData] = await Promise.all([
+        const [templatesData, listsData, tagsData] = await Promise.all([
           window.electron.templates.getAll(),
-          window.electron.lists.getAll()
+          window.electron.lists.getAll(),
+          window.electron.tags.getAll()
         ]);
         setTemplates(templatesData || []);
         setLists(listsData || []);
+        setTags(tagsData || []);
       }
     } catch (error) {
       console.error('Failed to load data:', error);
     }
+  };
+
+  const updateRecipientCount = async () => {
+    try {
+      if (window.electron) {
+        const filter = { listId: campaign.listId || '' };
+        if (campaign.selectedTags && campaign.selectedTags.length > 0) {
+          filter.tags = campaign.selectedTags;
+        }
+        const count = await window.electron.contacts.getRecipientCount(filter);
+        setRecipientCount(count || 0);
+      }
+    } catch (error) {
+      console.error('Failed to get recipient count:', error);
+    }
+  };
+
+  const toggleTag = (tagId) => {
+    setCampaign(prev => {
+      const currentTags = prev.selectedTags || [];
+      const newTags = currentTags.includes(tagId)
+        ? currentTags.filter(t => t !== tagId)
+        : [...currentTags, tagId];
+      return { ...prev, selectedTags: newTags };
+    });
   };
 
   const checkSpamScore = async () => {
@@ -111,13 +146,16 @@ function Composer() {
     }
 
     try {
-      // Count contacts
-      const contacts = campaign.listId
-        ? await window.electron.lists.getContacts(campaign.listId)
-        : await window.electron.contacts.getAll();
+      // Count contacts with tag filtering
+      const filter = { listId: campaign.listId || '' };
+      if (campaign.selectedTags && campaign.selectedTags.length > 0) {
+        filter.tags = campaign.selectedTags;
+      }
+      const contacts = await window.electron.contacts.getForCampaign(filter);
 
       await window.electron.campaigns.add({
         ...campaign,
+        selectedTags: campaign.selectedTags || [],
         totalEmails: contacts.length
       });
       addToast('Campaign saved as draft', 'success');
@@ -187,6 +225,65 @@ function Composer() {
                 <option key={list.id} value={list.id}>{list.name}</option>
               ))}
             </select>
+          </div>
+
+          {/* Tag Filtering */}
+          {tags.length > 0 && (
+            <div className="form-group">
+              <label className="form-label"><Tag size={14} style={{ marginRight: '4px' }} /> Filter by Tags</label>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '8px' }}>
+                {tags.map(tag => (
+                  <button
+                    key={tag.id}
+                    type="button"
+                    onClick={() => toggleTag(tag.id)}
+                    style={{
+                      padding: '4px 10px',
+                      borderRadius: '12px',
+                      border: campaign.selectedTags?.includes(tag.id) ? 'none' : '1px solid var(--border)',
+                      background: campaign.selectedTags?.includes(tag.id) ? tag.color : 'var(--bg-secondary)',
+                      color: campaign.selectedTags?.includes(tag.id) ? '#fff' : 'var(--text)',
+                      fontSize: '12px',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s'
+                    }}
+                  >
+                    {tag.name}
+                  </button>
+                ))}
+              </div>
+              {campaign.selectedTags?.length > 0 && (
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm mt-2"
+                  onClick={() => setCampaign({ ...campaign, selectedTags: [] })}
+                  style={{ fontSize: '11px' }}
+                >
+                  Clear Tags
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Recipient Count */}
+          <div style={{ 
+            background: 'var(--bg-tertiary)', 
+            borderRadius: '8px', 
+            padding: '12px', 
+            marginBottom: '16px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px'
+          }}>
+            <Users size={18} style={{ color: 'var(--accent)' }} />
+            <div>
+              <div style={{ fontSize: '18px', fontWeight: '600' }}>{recipientCount.toLocaleString()}</div>
+              <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                {campaign.selectedTags?.length > 0 
+                  ? `Recipients (filtered by ${campaign.selectedTags.length} tag${campaign.selectedTags.length > 1 ? 's' : ''})`
+                  : 'Total Recipients'}
+              </div>
+            </div>
           </div>
 
           <div className="form-group">

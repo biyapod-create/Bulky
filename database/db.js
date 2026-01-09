@@ -16,7 +16,7 @@ class BulkyDatabase {
     if (fs.existsSync(this.dbPath)) {
       const buffer = fs.readFileSync(this.dbPath);
       this.db = new this.SQL.Database(buffer);
-      this.migrateSchema(); // Migrate existing database
+      this.migrateSchema();
     } else {
       this.db = new this.SQL.Database();
     }
@@ -31,24 +31,31 @@ class BulkyDatabase {
     fs.writeFileSync(this.dbPath, buffer);
   }
 
-  // Migration for existing databases
   migrateSchema() {
     const migrations = [
-      // Add new columns to contacts table
+      // Contacts table migrations
       { table: 'contacts', column: 'company', type: 'TEXT' },
       { table: 'contacts', column: 'phone', type: 'TEXT' },
       { table: 'contacts', column: 'customField1', type: 'TEXT' },
       { table: 'contacts', column: 'customField2', type: 'TEXT' },
       { table: 'contacts', column: 'tags', type: "TEXT DEFAULT '[]'" },
       { table: 'contacts', column: 'verificationScore', type: 'INTEGER DEFAULT 0' },
+      { table: 'contacts', column: 'verificationMethod', type: 'TEXT' },
+      { table: 'contacts', column: 'verificationDetails', type: 'TEXT' },
       { table: 'contacts', column: 'engagementScore', type: 'INTEGER DEFAULT 0' },
       { table: 'contacts', column: 'totalOpens', type: 'INTEGER DEFAULT 0' },
       { table: 'contacts', column: 'totalClicks', type: 'INTEGER DEFAULT 0' },
       { table: 'contacts', column: 'lastOpenedAt', type: 'TEXT' },
       { table: 'contacts', column: 'lastClickedAt', type: 'TEXT' },
-      // Add new columns to templates table
+      { table: 'contacts', column: 'bounceCount', type: 'INTEGER DEFAULT 0' },
+      { table: 'contacts', column: 'lastBounceReason', type: 'TEXT' },
+      { table: 'contacts', column: 'lastBounceAt', type: 'TEXT' },
+      { table: 'contacts', column: 'isDisposable', type: 'INTEGER DEFAULT 0' },
+      { table: 'contacts', column: 'isRoleBased', type: 'INTEGER DEFAULT 0' },
+      { table: 'contacts', column: 'isCatchAll', type: 'INTEGER DEFAULT 0' },
+      // Templates table migrations
       { table: 'templates', column: 'category', type: "TEXT DEFAULT 'general'" },
-      // Add new columns to campaigns table
+      // Campaigns table migrations
       { table: 'campaigns', column: 'subjectB', type: 'TEXT' },
       { table: 'campaigns', column: 'contentB', type: 'TEXT' },
       { table: 'campaigns', column: 'isABTest', type: 'INTEGER DEFAULT 0' },
@@ -57,20 +64,29 @@ class BulkyDatabase {
       { table: 'campaigns', column: 'openedEmails', type: 'INTEGER DEFAULT 0' },
       { table: 'campaigns', column: 'clickedEmails', type: 'INTEGER DEFAULT 0' },
       { table: 'campaigns', column: 'bouncedEmails', type: 'INTEGER DEFAULT 0' },
-      // Add new columns to smtp_settings
+      { table: 'campaigns', column: 'softBouncedEmails', type: 'INTEGER DEFAULT 0' },
+      // SMTP settings migrations
       { table: 'smtp_settings', column: 'replyTo', type: 'TEXT' },
       { table: 'smtp_settings', column: 'unsubscribeEmail', type: 'TEXT' },
       { table: 'smtp_settings', column: 'unsubscribeUrl', type: 'TEXT' },
-      // Add new columns to campaign_logs
+      // Campaign logs migrations
       { table: 'campaign_logs', column: 'variant', type: "TEXT DEFAULT 'A'" },
+      { table: 'campaign_logs', column: 'smtpCode', type: 'INTEGER' },
+      { table: 'campaign_logs', column: 'smtpResponse', type: 'TEXT' },
+      { table: 'campaign_logs', column: 'failureType', type: 'TEXT' },
+      { table: 'campaign_logs', column: 'failureReason', type: 'TEXT' },
+      { table: 'campaign_logs', column: 'trackingId', type: 'TEXT' },
+      { table: 'campaign_logs', column: 'openedAt', type: 'TEXT' },
+      { table: 'campaign_logs', column: 'clickedAt', type: 'TEXT' },
+      // Blacklist migrations
+      { table: 'blacklist', column: 'bounceType', type: 'TEXT' },
+      { table: 'blacklist', column: 'smtpCode', type: 'INTEGER' },
     ];
 
     for (const migration of migrations) {
       try {
         this.db.run(`ALTER TABLE ${migration.table} ADD COLUMN ${migration.column} ${migration.type}`);
-      } catch (e) {
-        // Column already exists, ignore
-      }
+      } catch (e) {}
     }
   }
 
@@ -96,7 +112,7 @@ class BulkyDatabase {
       )
     `);
 
-    // Contacts table
+    // Contacts table with enhanced verification fields
     this.db.run(`
       CREATE TABLE IF NOT EXISTS contacts (
         id TEXT PRIMARY KEY,
@@ -112,18 +128,26 @@ class BulkyDatabase {
         status TEXT DEFAULT 'active',
         verified INTEGER DEFAULT 0,
         verificationScore INTEGER DEFAULT 0,
+        verificationMethod TEXT,
+        verificationDetails TEXT,
         engagementScore INTEGER DEFAULT 0,
         totalOpens INTEGER DEFAULT 0,
         totalClicks INTEGER DEFAULT 0,
         lastOpenedAt TEXT,
         lastClickedAt TEXT,
+        bounceCount INTEGER DEFAULT 0,
+        lastBounceReason TEXT,
+        lastBounceAt TEXT,
+        isDisposable INTEGER DEFAULT 0,
+        isRoleBased INTEGER DEFAULT 0,
+        isCatchAll INTEGER DEFAULT 0,
         createdAt TEXT DEFAULT CURRENT_TIMESTAMP,
         updatedAt TEXT DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (listId) REFERENCES lists(id) ON DELETE SET NULL
       )
     `);
 
-    // Blacklist table
+    // Blacklist table with bounce tracking
     this.db.run(`
       CREATE TABLE IF NOT EXISTS blacklist (
         id TEXT PRIMARY KEY,
@@ -131,6 +155,8 @@ class BulkyDatabase {
         domain TEXT,
         reason TEXT,
         source TEXT DEFAULT 'manual',
+        bounceType TEXT,
+        smtpCode INTEGER,
         createdAt TEXT DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -148,8 +174,7 @@ class BulkyDatabase {
       )
     `);
 
-
-    // SMTP Accounts table (multiple accounts)
+    // SMTP Accounts table
     this.db.run(`
       CREATE TABLE IF NOT EXISTS smtp_accounts (
         id TEXT PRIMARY KEY,
@@ -172,7 +197,7 @@ class BulkyDatabase {
       )
     `);
 
-    // Campaigns table
+    // Campaigns table with bounce tracking
     this.db.run(`
       CREATE TABLE IF NOT EXISTS campaigns (
         id TEXT PRIMARY KEY,
@@ -185,6 +210,7 @@ class BulkyDatabase {
         abTestPercent INTEGER DEFAULT 10,
         abWinner TEXT,
         listId TEXT,
+        selectedTags TEXT,
         status TEXT DEFAULT 'draft',
         totalEmails INTEGER DEFAULT 0,
         sentEmails INTEGER DEFAULT 0,
@@ -192,6 +218,7 @@ class BulkyDatabase {
         openedEmails INTEGER DEFAULT 0,
         clickedEmails INTEGER DEFAULT 0,
         bouncedEmails INTEGER DEFAULT 0,
+        softBouncedEmails INTEGER DEFAULT 0,
         batchSize INTEGER DEFAULT 50,
         delayMinutes INTEGER DEFAULT 10,
         scheduledAt TEXT,
@@ -203,7 +230,7 @@ class BulkyDatabase {
       )
     `);
 
-    // Campaign logs table
+    // Campaign logs with full SMTP tracking
     this.db.run(`
       CREATE TABLE IF NOT EXISTS campaign_logs (
         id TEXT PRIMARY KEY,
@@ -212,6 +239,13 @@ class BulkyDatabase {
         email TEXT NOT NULL,
         status TEXT NOT NULL,
         variant TEXT DEFAULT 'A',
+        smtpCode INTEGER,
+        smtpResponse TEXT,
+        failureType TEXT,
+        failureReason TEXT,
+        trackingId TEXT,
+        openedAt TEXT,
+        clickedAt TEXT,
         error TEXT,
         sentAt TEXT DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (campaignId) REFERENCES campaigns(id) ON DELETE CASCADE
@@ -256,7 +290,7 @@ class BulkyDatabase {
       )
     `);
 
-    // Legacy SMTP settings (backwards compatibility)
+    // Legacy SMTP settings
     this.db.run(`
       CREATE TABLE IF NOT EXISTS smtp_settings (
         id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -284,6 +318,7 @@ class BulkyDatabase {
         maxRetriesPerEmail INTEGER DEFAULT 2,
         enableTracking INTEGER DEFAULT 1,
         trackingDomain TEXT,
+        enableSmtpVerification INTEGER DEFAULT 1,
         updatedAt TEXT DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -292,12 +327,19 @@ class BulkyDatabase {
     try {
       this.db.run(`CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(email)`);
       this.db.run(`CREATE INDEX IF NOT EXISTS idx_contacts_listId ON contacts(listId)`);
+      this.db.run(`CREATE INDEX IF NOT EXISTS idx_contacts_verified ON contacts(verified)`);
+      this.db.run(`CREATE INDEX IF NOT EXISTS idx_contacts_bounceCount ON contacts(bounceCount)`);
       this.db.run(`CREATE INDEX IF NOT EXISTS idx_campaign_logs_campaignId ON campaign_logs(campaignId)`);
+      this.db.run(`CREATE INDEX IF NOT EXISTS idx_campaign_logs_status ON campaign_logs(status)`);
+      this.db.run(`CREATE INDEX IF NOT EXISTS idx_campaign_logs_trackingId ON campaign_logs(trackingId)`);
       this.db.run(`CREATE INDEX IF NOT EXISTS idx_blacklist_email ON blacklist(email)`);
       this.db.run(`CREATE INDEX IF NOT EXISTS idx_blacklist_domain ON blacklist(domain)`);
       this.db.run(`CREATE INDEX IF NOT EXISTS idx_tracking_campaignId ON email_tracking(campaignId)`);
       this.db.run(`CREATE INDEX IF NOT EXISTS idx_unsubscribes_email ON unsubscribes(email)`);
     } catch (e) {}
+
+    // Migrations for new columns
+    try { this.db.run(`ALTER TABLE campaigns ADD COLUMN selectedTags TEXT`); } catch (e) {}
 
     // Initialize default settings
     const smtpExists = this.db.exec('SELECT id FROM smtp_settings WHERE id = 1');
@@ -346,8 +388,6 @@ class BulkyDatabase {
     }
   }
 
-
-  // Helper to convert sql.js result to array of objects
   resultToObjects(result) {
     if (!result || result.length === 0) return [];
     const columns = result[0].columns;
@@ -384,9 +424,68 @@ class BulkyDatabase {
       const s = `%${filter.search}%`; params.push(s, s, s, s);
     }
     if (filter.tag) { query += ` AND c.tags LIKE ?`; params.push(`%"${filter.tag}"%`); }
+    if (filter.hasBounced) { query += ` AND c.bounceCount > 0`; }
+    if (filter.isDisposable) { query += ` AND c.isDisposable = 1`; }
+    if (filter.isRoleBased) { query += ` AND c.isRoleBased = 1`; }
 
     query += ` ORDER BY c.${filter.sortBy || 'createdAt'} ${filter.sortOrder || 'DESC'}`;
     if (filter.limit) { query += ` LIMIT ?`; params.push(filter.limit); }
+
+    const result = this.db.exec(query, params);
+    return this.resultToObjects(result);
+  }
+
+  // Get recipient count for campaign targeting (with tag support)
+  getRecipientCount(filter = {}) {
+    let query = `SELECT COUNT(*) as count FROM contacts c WHERE c.status = 'active'`;
+    const params = [];
+
+    if (filter.listId) { 
+      query += ` AND c.listId = ?`; 
+      params.push(filter.listId); 
+    }
+    
+    // Tag filtering - contact must have ALL selected tags
+    if (filter.tags && filter.tags.length > 0) {
+      for (const tagId of filter.tags) {
+        query += ` AND c.tags LIKE ?`;
+        params.push(`%"${tagId}"%`);
+      }
+    }
+
+    // Exclude bounced, blacklisted, unsubscribed
+    query += ` AND c.bounceCount < 2`;
+    query += ` AND c.email NOT IN (SELECT email FROM blacklist WHERE email IS NOT NULL)`;
+    query += ` AND c.email NOT IN (SELECT email FROM unsubscribes WHERE email IS NOT NULL)`;
+
+    const result = this.db.exec(query, params);
+    return result[0]?.values[0]?.[0] || 0;
+  }
+
+  // Get contacts for campaign sending (with tag support)
+  getContactsForCampaign(filter = {}) {
+    let query = `SELECT c.* FROM contacts c WHERE c.status = 'active'`;
+    const params = [];
+
+    if (filter.listId) { 
+      query += ` AND c.listId = ?`; 
+      params.push(filter.listId); 
+    }
+    
+    // Tag filtering
+    if (filter.tags && filter.tags.length > 0) {
+      for (const tagId of filter.tags) {
+        query += ` AND c.tags LIKE ?`;
+        params.push(`%"${tagId}"%`);
+      }
+    }
+
+    // Exclude problematic contacts
+    query += ` AND c.bounceCount < 2`;
+    query += ` AND c.email NOT IN (SELECT email FROM blacklist WHERE email IS NOT NULL)`;
+    query += ` AND c.email NOT IN (SELECT email FROM unsubscribes WHERE email IS NOT NULL)`;
+
+    query += ` ORDER BY c.createdAt DESC`;
 
     const result = this.db.exec(query, params);
     return this.resultToObjects(result);
@@ -396,12 +495,13 @@ class BulkyDatabase {
     const id = uuidv4();
     try {
       this.db.run(`
-        INSERT INTO contacts (id, email, firstName, lastName, company, phone, customField1, customField2, listId, tags, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO contacts (id, email, firstName, lastName, company, phone, customField1, customField2, listId, tags, status, isDisposable, isRoleBased)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [id, contact.email, contact.firstName || null, contact.lastName || null,
           contact.company || null, contact.phone || null, contact.customField1 || null,
           contact.customField2 || null, contact.listId || null,
-          JSON.stringify(contact.tags || []), contact.status || 'active']);
+          JSON.stringify(contact.tags || []), contact.status || 'active',
+          contact.isDisposable ? 1 : 0, contact.isRoleBased ? 1 : 0]);
       this.save();
       return { success: true, id };
     } catch (error) {
@@ -418,12 +518,13 @@ class BulkyDatabase {
       if (this.isBlacklisted(contact.email)) { skipped++; continue; }
       try {
         this.db.run(`
-          INSERT OR IGNORE INTO contacts (id, email, firstName, lastName, company, phone, customField1, customField2, listId, tags, status)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT OR IGNORE INTO contacts (id, email, firstName, lastName, company, phone, customField1, customField2, listId, tags, status, isDisposable, isRoleBased)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `, [uuidv4(), contact.email, contact.firstName || null, contact.lastName || null,
             contact.company || null, contact.phone || null, contact.customField1 || null,
             contact.customField2 || null, contact.listId || null,
-            JSON.stringify(contact.tags || []), contact.status || 'active']);
+            JSON.stringify(contact.tags || []), contact.status || 'active',
+            contact.isDisposable ? 1 : 0, contact.isRoleBased ? 1 : 0]);
         if (this.db.getRowsModified() > 0) inserted++; else skipped++;
       } catch (e) { skipped++; }
     }
@@ -436,14 +537,48 @@ class BulkyDatabase {
       UPDATE contacts 
       SET email = ?, firstName = ?, lastName = ?, company = ?, phone = ?,
           customField1 = ?, customField2 = ?, listId = ?, tags = ?, status = ?, 
-          verified = ?, verificationScore = ?, updatedAt = CURRENT_TIMESTAMP
+          verified = ?, verificationScore = ?, verificationMethod = ?, verificationDetails = ?,
+          isDisposable = ?, isRoleBased = ?, isCatchAll = ?, updatedAt = CURRENT_TIMESTAMP
       WHERE id = ?
     `, [contact.email, contact.firstName, contact.lastName, contact.company, contact.phone,
         contact.customField1, contact.customField2, contact.listId,
         JSON.stringify(contact.tags || []), contact.status,
-        contact.verified ? 1 : 0, contact.verificationScore || 0, contact.id]);
+        contact.verified ? 1 : 0, contact.verificationScore || 0,
+        contact.verificationMethod || null, contact.verificationDetails || null,
+        contact.isDisposable ? 1 : 0, contact.isRoleBased ? 1 : 0, contact.isCatchAll ? 1 : 0,
+        contact.id]);
     this.save();
     return { success: true };
+  }
+
+  // Update contact verification result
+  updateContactVerification(contactId, verificationResult) {
+    this.db.run(`
+      UPDATE contacts 
+      SET verified = ?, verificationScore = ?, verificationMethod = ?, verificationDetails = ?,
+          isDisposable = ?, isRoleBased = ?, isCatchAll = ?, updatedAt = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `, [
+      verificationResult.status === 'valid' ? 1 : 0,
+      verificationResult.score || 0,
+      verificationResult.details?.method || 'unknown',
+      JSON.stringify(verificationResult),
+      verificationResult.details?.isDisposable ? 1 : 0,
+      verificationResult.details?.isRoleBased ? 1 : 0,
+      verificationResult.details?.isCatchAll ? 1 : 0,
+      contactId
+    ]);
+    this.save();
+  }
+
+  // Increment bounce count for a contact
+  incrementContactBounce(contactId, reason) {
+    this.db.run(`
+      UPDATE contacts 
+      SET bounceCount = bounceCount + 1, lastBounceReason = ?, lastBounceAt = CURRENT_TIMESTAMP, updatedAt = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `, [reason, contactId]);
+    this.save();
   }
 
   updateContactEngagement(contactId, type) {
@@ -468,6 +603,21 @@ class BulkyDatabase {
     this.db.run(`DELETE FROM contacts WHERE ${condition}`);
     this.save();
     return { success: true, deleted: count };
+  }
+
+  // Delete bounced contacts
+  deleteBouncedContacts(minBounceCount = 2) {
+    const result = this.db.exec(`SELECT COUNT(*) as count FROM contacts WHERE bounceCount >= ?`, [minBounceCount]);
+    const count = result.length > 0 ? result[0].values[0][0] : 0;
+    this.db.run(`DELETE FROM contacts WHERE bounceCount >= ?`, [minBounceCount]);
+    this.save();
+    return { success: true, deleted: count };
+  }
+
+  // Get bounced contacts
+  getBouncedContacts() {
+    const result = this.db.exec(`SELECT * FROM contacts WHERE bounceCount > 0 ORDER BY bounceCount DESC, lastBounceAt DESC`);
+    return this.resultToObjects(result);
   }
 
   getContactsByList(listId) {
@@ -523,7 +673,6 @@ class BulkyDatabase {
     return { success: true };
   }
 
-
   // ==================== BLACKLIST ====================
   getAllBlacklist() {
     const result = this.db.exec('SELECT * FROM blacklist ORDER BY createdAt DESC');
@@ -534,9 +683,11 @@ class BulkyDatabase {
     const id = uuidv4();
     try {
       if (entry.email) {
-        this.db.run(`INSERT OR IGNORE INTO blacklist (id, email, reason, source) VALUES (?, ?, ?, ?)`, [id, entry.email.toLowerCase(), entry.reason || null, entry.source || 'manual']);
+        this.db.run(`INSERT OR IGNORE INTO blacklist (id, email, reason, source, bounceType, smtpCode) VALUES (?, ?, ?, ?, ?, ?)`, 
+          [id, entry.email.toLowerCase(), entry.reason || null, entry.source || 'manual', entry.bounceType || null, entry.smtpCode || null]);
       } else if (entry.domain) {
-        this.db.run(`INSERT OR IGNORE INTO blacklist (id, domain, reason, source) VALUES (?, ?, ?, ?)`, [id, entry.domain.toLowerCase(), entry.reason || null, entry.source || 'manual']);
+        this.db.run(`INSERT OR IGNORE INTO blacklist (id, domain, reason, source) VALUES (?, ?, ?, ?)`, 
+          [id, entry.domain.toLowerCase(), entry.reason || null, entry.source || 'manual']);
       }
       this.save();
       return { success: true };
@@ -547,7 +698,8 @@ class BulkyDatabase {
     let added = 0;
     for (const entry of entries) {
       try {
-        this.db.run(`INSERT OR IGNORE INTO blacklist (id, email, reason, source) VALUES (?, ?, ?, ?)`, [uuidv4(), (entry.email || entry).toLowerCase(), 'Bulk import', source]);
+        this.db.run(`INSERT OR IGNORE INTO blacklist (id, email, reason, source) VALUES (?, ?, ?, ?)`, 
+          [uuidv4(), (entry.email || entry).toLowerCase(), 'Bulk import', source]);
         if (this.db.getRowsModified() > 0) added++;
       } catch (e) {}
     }
@@ -577,7 +729,8 @@ class BulkyDatabase {
 
   addUnsubscribe(email, campaignId = null, reason = null) {
     try {
-      this.db.run(`INSERT OR IGNORE INTO unsubscribes (id, email, campaignId, reason) VALUES (?, ?, ?, ?)`, [uuidv4(), email.toLowerCase(), campaignId, reason]);
+      this.db.run(`INSERT OR IGNORE INTO unsubscribes (id, email, campaignId, reason) VALUES (?, ?, ?, ?)`, 
+        [uuidv4(), email.toLowerCase(), campaignId, reason]);
       this.addToBlacklist({ email, reason: 'Unsubscribed', source: 'unsubscribe' });
       this.save();
       return { success: true };
@@ -587,6 +740,14 @@ class BulkyDatabase {
   isUnsubscribed(email) {
     const result = this.db.exec('SELECT COUNT(*) as count FROM unsubscribes WHERE email = ?', [email.toLowerCase()]);
     return result.length > 0 && result[0].values[0][0] > 0;
+  }
+
+  removeUnsubscribe(email) {
+    try {
+      this.db.run('DELETE FROM unsubscribes WHERE email = ?', [email.toLowerCase()]);
+      this.save();
+      return { success: true };
+    } catch (e) { return { success: false, error: e.message }; }
   }
 
   // ==================== TEMPLATES ====================
@@ -602,13 +763,15 @@ class BulkyDatabase {
 
   addTemplate(template) {
     const id = uuidv4();
-    this.db.run(`INSERT INTO templates (id, name, subject, content, category) VALUES (?, ?, ?, ?, ?)`, [id, template.name, template.subject, template.content, template.category || 'general']);
+    this.db.run(`INSERT INTO templates (id, name, subject, content, category) VALUES (?, ?, ?, ?, ?)`, 
+      [id, template.name, template.subject, template.content, template.category || 'general']);
     this.save();
     return { success: true, id };
   }
 
   updateTemplate(template) {
-    this.db.run(`UPDATE templates SET name = ?, subject = ?, content = ?, category = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`, [template.name, template.subject, template.content, template.category || 'general', template.id]);
+    this.db.run(`UPDATE templates SET name = ?, subject = ?, content = ?, category = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`, 
+      [template.name, template.subject, template.content, template.category || 'general', template.id]);
     this.save();
     return { success: true };
   }
@@ -619,7 +782,7 @@ class BulkyDatabase {
     return { success: true };
   }
 
-  // ==================== SMTP ACCOUNTS (Multiple) ====================
+  // ==================== SMTP ACCOUNTS ====================
   getAllSmtpAccounts() {
     const result = this.db.exec('SELECT * FROM smtp_accounts ORDER BY priority, createdAt');
     return this.resultToObjects(result);
@@ -681,14 +844,16 @@ class BulkyDatabase {
   addSpamReplacement(item) {
     const id = uuidv4();
     try {
-      this.db.run(`INSERT INTO spam_replacements (id, spamWord, replacement, category) VALUES (?, ?, ?, ?)`, [id, item.spamWord, item.replacement, item.category || 'general']);
+      this.db.run(`INSERT INTO spam_replacements (id, spamWord, replacement, category) VALUES (?, ?, ?, ?)`, 
+        [id, item.spamWord, item.replacement, item.category || 'general']);
       this.save();
       return { success: true, id };
     } catch (e) { return { success: false, error: 'Word already exists' }; }
   }
 
   updateSpamReplacement(item) {
-    this.db.run(`UPDATE spam_replacements SET spamWord = ?, replacement = ?, category = ?, isActive = ? WHERE id = ?`, [item.spamWord, item.replacement, item.category, item.isActive ? 1 : 0, item.id]);
+    this.db.run(`UPDATE spam_replacements SET spamWord = ?, replacement = ?, category = ?, isActive = ? WHERE id = ?`, 
+      [item.spamWord, item.replacement, item.category, item.isActive ? 1 : 0, item.id]);
     this.save();
     return { success: true };
   }
@@ -699,11 +864,16 @@ class BulkyDatabase {
     return { success: true };
   }
 
-
   // ==================== CAMPAIGNS ====================
   getAllCampaigns() {
     const result = this.db.exec(`SELECT c.*, l.name as listName FROM campaigns c LEFT JOIN lists l ON c.listId = l.id ORDER BY c.createdAt DESC`);
     return this.resultToObjects(result);
+  }
+
+  getCampaign(id) {
+    const result = this.db.exec(`SELECT c.*, l.name as listName FROM campaigns c LEFT JOIN lists l ON c.listId = l.id WHERE c.id = ?`, [id]);
+    const arr = this.resultToObjects(result);
+    return arr.length > 0 ? arr[0] : null;
   }
 
   getScheduledCampaigns() {
@@ -713,15 +883,17 @@ class BulkyDatabase {
 
   addCampaign(campaign) {
     const id = uuidv4();
-    this.db.run(`INSERT INTO campaigns (id, name, subject, subjectB, content, contentB, isABTest, abTestPercent, listId, status, totalEmails, batchSize, delayMinutes, scheduledAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, campaign.name, campaign.subject, campaign.subjectB || null, campaign.content, campaign.contentB || null, campaign.isABTest ? 1 : 0, campaign.abTestPercent || 10, campaign.listId || null, campaign.status || 'draft', campaign.totalEmails || 0, campaign.batchSize || 50, campaign.delayMinutes || 10, campaign.scheduledAt || null]);
+    const selectedTags = campaign.selectedTags ? JSON.stringify(campaign.selectedTags) : null;
+    this.db.run(`INSERT INTO campaigns (id, name, subject, subjectB, content, contentB, isABTest, abTestPercent, listId, selectedTags, status, totalEmails, batchSize, delayMinutes, scheduledAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, campaign.name, campaign.subject, campaign.subjectB || null, campaign.content, campaign.contentB || null, campaign.isABTest ? 1 : 0, campaign.abTestPercent || 10, campaign.listId || null, selectedTags, campaign.status || 'draft', campaign.totalEmails || 0, campaign.batchSize || 50, campaign.delayMinutes || 10, campaign.scheduledAt || null]);
     this.save();
     return { success: true, id };
   }
 
   updateCampaign(campaign) {
-    this.db.run(`UPDATE campaigns SET name = ?, subject = ?, subjectB = ?, content = ?, contentB = ?, isABTest = ?, abTestPercent = ?, abWinner = ?, listId = ?, status = ?, totalEmails = ?, sentEmails = ?, failedEmails = ?, openedEmails = ?, clickedEmails = ?, bouncedEmails = ?, batchSize = ?, delayMinutes = ?, scheduledAt = ?, startedAt = ?, completedAt = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`,
-      [campaign.name, campaign.subject, campaign.subjectB, campaign.content, campaign.contentB, campaign.isABTest ? 1 : 0, campaign.abTestPercent, campaign.abWinner, campaign.listId, campaign.status, campaign.totalEmails, campaign.sentEmails, campaign.failedEmails, campaign.openedEmails || 0, campaign.clickedEmails || 0, campaign.bouncedEmails || 0, campaign.batchSize, campaign.delayMinutes, campaign.scheduledAt, campaign.startedAt, campaign.completedAt, campaign.id]);
+    const selectedTags = campaign.selectedTags ? (typeof campaign.selectedTags === 'string' ? campaign.selectedTags : JSON.stringify(campaign.selectedTags)) : null;
+    this.db.run(`UPDATE campaigns SET name = ?, subject = ?, subjectB = ?, content = ?, contentB = ?, isABTest = ?, abTestPercent = ?, abWinner = ?, listId = ?, selectedTags = ?, status = ?, totalEmails = ?, sentEmails = ?, failedEmails = ?, openedEmails = ?, clickedEmails = ?, bouncedEmails = ?, softBouncedEmails = ?, batchSize = ?, delayMinutes = ?, scheduledAt = ?, startedAt = ?, completedAt = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`,
+      [campaign.name, campaign.subject, campaign.subjectB, campaign.content, campaign.contentB, campaign.isABTest ? 1 : 0, campaign.abTestPercent, campaign.abWinner, campaign.listId, selectedTags, campaign.status, campaign.totalEmails, campaign.sentEmails, campaign.failedEmails, campaign.openedEmails || 0, campaign.clickedEmails || 0, campaign.bouncedEmails || 0, campaign.softBouncedEmails || 0, campaign.batchSize, campaign.delayMinutes, campaign.scheduledAt, campaign.startedAt, campaign.completedAt, campaign.id]);
     this.save();
     return { success: true };
   }
@@ -734,7 +906,7 @@ class BulkyDatabase {
     return { success: true };
   }
 
-  scheduleCampaign(campaignId, scheduledAt, timezone = 'UTC') {
+  scheduleCampaign(campaignId, scheduledAt) {
     this.db.run(`UPDATE campaigns SET status = 'scheduled', scheduledAt = ? WHERE id = ?`, [scheduledAt, campaignId]);
     this.save();
     return { success: true };
@@ -749,8 +921,8 @@ class BulkyDatabase {
   // ==================== CAMPAIGN LOGS ====================
   addCampaignLog(log) {
     const id = uuidv4();
-    this.db.run(`INSERT INTO campaign_logs (id, campaignId, contactId, email, status, variant, error) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [id, log.campaignId, log.contactId || null, log.email, log.status, log.variant || 'A', log.error || null]);
+    this.db.run(`INSERT INTO campaign_logs (id, campaignId, contactId, email, status, variant, smtpCode, smtpResponse, failureType, failureReason, trackingId, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, log.campaignId, log.contactId || null, log.email, log.status, log.variant || 'A', log.smtpCode || null, log.smtpResponse || null, log.failureType || null, log.failureReason || null, log.trackingId || null, log.error || null]);
     this.save();
     return { success: true, id };
   }
@@ -758,6 +930,44 @@ class BulkyDatabase {
   getCampaignLogs(campaignId) {
     const result = this.db.exec(`SELECT * FROM campaign_logs WHERE campaignId = ? ORDER BY sentAt DESC`, [campaignId]);
     return this.resultToObjects(result);
+  }
+
+  // Get logs by status (for analytics)
+  getCampaignLogsByStatus(campaignId, status) {
+    const result = this.db.exec(`SELECT * FROM campaign_logs WHERE campaignId = ? AND status = ? ORDER BY sentAt DESC`, [campaignId, status]);
+    return this.resultToObjects(result);
+  }
+
+  // Get bounced emails for a campaign
+  getCampaignBounces(campaignId) {
+    const result = this.db.exec(`SELECT * FROM campaign_logs WHERE campaignId = ? AND (status = 'bounced' OR status = 'soft_bounce' OR failureType LIKE '%bounce%') ORDER BY sentAt DESC`, [campaignId]);
+    return this.resultToObjects(result);
+  }
+
+  // Update log when email is opened/clicked
+  updateCampaignLogTracking(trackingId, type) {
+    const field = type === 'open' ? 'openedAt' : 'clickedAt';
+    this.db.run(`UPDATE campaign_logs SET ${field} = CURRENT_TIMESTAMP WHERE trackingId = ?`, [trackingId]);
+    this.save();
+  }
+
+  // Get campaign log by tracking ID
+  getCampaignLogByTracking(campaignId, trackingId) {
+    const result = this.db.exec(`SELECT * FROM campaign_logs WHERE campaignId = ? AND trackingId = ?`, [campaignId, trackingId]);
+    const arr = this.resultToObjects(result);
+    return arr.length > 0 ? arr[0] : null;
+  }
+
+  // Update log when email is opened
+  updateCampaignLogOpened(campaignId, trackingId) {
+    this.db.run(`UPDATE campaign_logs SET openedAt = CURRENT_TIMESTAMP WHERE campaignId = ? AND trackingId = ? AND openedAt IS NULL`, [campaignId, trackingId]);
+    this.save();
+  }
+
+  // Update log when email is clicked
+  updateCampaignLogClicked(campaignId, trackingId) {
+    this.db.run(`UPDATE campaign_logs SET clickedAt = CURRENT_TIMESTAMP WHERE campaignId = ? AND trackingId = ? AND clickedAt IS NULL`, [campaignId, trackingId]);
+    this.save();
   }
 
   // ==================== EMAIL TRACKING ====================
@@ -768,6 +978,7 @@ class BulkyDatabase {
     if (event.type === 'open') this.db.run(`UPDATE campaigns SET openedEmails = openedEmails + 1 WHERE id = ?`, [event.campaignId]);
     else if (event.type === 'click') this.db.run(`UPDATE campaigns SET clickedEmails = clickedEmails + 1 WHERE id = ?`, [event.campaignId]);
     if (event.contactId) this.updateContactEngagement(event.contactId, event.type);
+    if (event.trackingId) this.updateCampaignLogTracking(event.trackingId, event.type);
     this.save();
     return { success: true, id };
   }
@@ -777,15 +988,67 @@ class BulkyDatabase {
     return this.resultToObjects(result);
   }
 
+  // ==================== ANALYTICS ====================
   getCampaignAnalytics(campaignId) {
     const campaign = this.db.exec(`SELECT * FROM campaigns WHERE id = ?`, [campaignId]);
     const campaignData = this.resultToObjects(campaign)[0] || {};
-    const opensByHour = this.db.exec(`SELECT strftime('%H', createdAt) as hour, COUNT(*) as count FROM email_tracking WHERE campaignId = ? AND type = 'open' GROUP BY hour ORDER BY hour`, [campaignId]);
-    const clicksByLink = this.db.exec(`SELECT link, COUNT(*) as count FROM email_tracking WHERE campaignId = ? AND type = 'click' AND link IS NOT NULL GROUP BY link ORDER BY count DESC LIMIT 10`, [campaignId]);
+    
+    // Get status breakdown from logs
+    const statusBreakdown = this.db.exec(`
+      SELECT status, failureType, COUNT(*) as count 
+      FROM campaign_logs 
+      WHERE campaignId = ? 
+      GROUP BY status, failureType
+    `, [campaignId]);
+    
+    // Get bounce reasons
+    const bounceReasons = this.db.exec(`
+      SELECT failureReason, COUNT(*) as count 
+      FROM campaign_logs 
+      WHERE campaignId = ? AND (status = 'bounced' OR status = 'soft_bounce' OR status = 'failed')
+      GROUP BY failureReason 
+      ORDER BY count DESC 
+      LIMIT 10
+    `, [campaignId]);
+    
+    const opensByHour = this.db.exec(`
+      SELECT strftime('%H', createdAt) as hour, COUNT(*) as count 
+      FROM email_tracking 
+      WHERE campaignId = ? AND type = 'open' 
+      GROUP BY hour ORDER BY hour
+    `, [campaignId]);
+    
+    const clicksByLink = this.db.exec(`
+      SELECT link, COUNT(*) as count 
+      FROM email_tracking 
+      WHERE campaignId = ? AND type = 'click' AND link IS NOT NULL 
+      GROUP BY link ORDER BY count DESC LIMIT 10
+    `, [campaignId]);
+
+    // Calculate real metrics
+    const sent = campaignData.sentEmails || 0;
+    const bounced = campaignData.bouncedEmails || 0;
+    const failed = campaignData.failedEmails || 0;
+    const opened = campaignData.openedEmails || 0;
+    const clicked = campaignData.clickedEmails || 0;
+    const delivered = sent - bounced;
+
     return {
       campaign: campaignData,
-      openRate: campaignData.sentEmails > 0 ? ((campaignData.openedEmails || 0) / campaignData.sentEmails * 100).toFixed(1) : 0,
-      clickRate: campaignData.sentEmails > 0 ? ((campaignData.clickedEmails || 0) / campaignData.sentEmails * 100).toFixed(1) : 0,
+      metrics: {
+        sent,
+        delivered,
+        bounced,
+        failed,
+        opened,
+        clicked,
+        deliveryRate: sent > 0 ? ((delivered / sent) * 100).toFixed(1) : 0,
+        bounceRate: sent > 0 ? ((bounced / sent) * 100).toFixed(1) : 0,
+        openRate: delivered > 0 ? ((opened / delivered) * 100).toFixed(1) : 0,
+        clickRate: opened > 0 ? ((clicked / opened) * 100).toFixed(1) : 0
+      },
+      statusBreakdown: this.resultToObjects(statusBreakdown),
+      bounceReasons: this.resultToObjects(bounceReasons),
       opensByHour: this.resultToObjects(opensByHour),
       clicksByLink: this.resultToObjects(clicksByLink)
     };
@@ -799,8 +1062,8 @@ class BulkyDatabase {
   }
 
   saveSettings(settings) {
-    this.db.run(`UPDATE app_settings SET theme = ?, defaultBatchSize = ?, defaultDelayMinutes = ?, maxRetriesPerEmail = ?, enableTracking = ?, trackingDomain = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = 1`,
-      [settings.theme, settings.defaultBatchSize, settings.defaultDelayMinutes, settings.maxRetriesPerEmail, settings.enableTracking ? 1 : 0, settings.trackingDomain]);
+    this.db.run(`UPDATE app_settings SET theme = ?, defaultBatchSize = ?, defaultDelayMinutes = ?, maxRetriesPerEmail = ?, enableTracking = ?, trackingDomain = ?, enableSmtpVerification = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = 1`,
+      [settings.theme, settings.defaultBatchSize, settings.defaultDelayMinutes, settings.maxRetriesPerEmail, settings.enableTracking ? 1 : 0, settings.trackingDomain, settings.enableSmtpVerification ? 1 : 0]);
     this.save();
     return { success: true };
   }
@@ -808,20 +1071,88 @@ class BulkyDatabase {
   // ==================== DASHBOARD STATS ====================
   getDashboardStats() {
     const totalContacts = this.db.exec('SELECT COUNT(*) as count FROM contacts')[0]?.values[0][0] || 0;
+    const verifiedContacts = this.db.exec('SELECT COUNT(*) as count FROM contacts WHERE verified = 1')[0]?.values[0][0] || 0;
+    const bouncedContacts = this.db.exec('SELECT COUNT(*) as count FROM contacts WHERE bounceCount > 0')[0]?.values[0][0] || 0;
     const totalCampaigns = this.db.exec('SELECT COUNT(*) as count FROM campaigns')[0]?.values[0][0] || 0;
     const totalSent = this.db.exec('SELECT COALESCE(SUM(sentEmails), 0) as count FROM campaigns')[0]?.values[0][0] || 0;
+    const totalBounced = this.db.exec('SELECT COALESCE(SUM(bouncedEmails), 0) as count FROM campaigns')[0]?.values[0][0] || 0;
     const totalOpened = this.db.exec('SELECT COALESCE(SUM(openedEmails), 0) as count FROM campaigns')[0]?.values[0][0] || 0;
-    const rateResult = this.db.exec(`SELECT CASE WHEN (sent + failed) > 0 THEN ROUND(sent * 100.0 / (sent + failed), 1) ELSE 0 END as rate FROM (SELECT COALESCE(SUM(sentEmails), 0) as sent, COALESCE(SUM(failedEmails), 0) as failed FROM campaigns)`);
-    const successRate = rateResult.length > 0 ? rateResult[0].values[0][0] : 0;
-    const openRate = totalSent > 0 ? (totalOpened / totalSent * 100).toFixed(1) : 0;
+    const totalClicked = this.db.exec('SELECT COALESCE(SUM(clickedEmails), 0) as count FROM campaigns')[0]?.values[0][0] || 0;
+    
+    // Calculate real rates
+    const delivered = totalSent - totalBounced;
+    const deliveryRate = totalSent > 0 ? ((delivered / totalSent) * 100).toFixed(1) : 0;
+    const bounceRate = totalSent > 0 ? ((totalBounced / totalSent) * 100).toFixed(1) : 0;
+    const openRate = delivered > 0 ? ((totalOpened / delivered) * 100).toFixed(1) : 0;
+    const clickRate = totalOpened > 0 ? ((totalClicked / totalOpened) * 100).toFixed(1) : 0;
+
     const recentResult = this.db.exec(`SELECT c.*, l.name as listName FROM campaigns c LEFT JOIN lists l ON c.listId = l.id ORDER BY c.createdAt DESC LIMIT 5`);
     const blacklistCount = this.db.exec('SELECT COUNT(*) as count FROM blacklist')[0]?.values[0][0] || 0;
     const unsubscribeCount = this.db.exec('SELECT COUNT(*) as count FROM unsubscribes')[0]?.values[0][0] || 0;
 
+    // Recent bounces
+    const recentBounces = this.db.exec(`
+      SELECT email, failureReason, sentAt 
+      FROM campaign_logs 
+      WHERE status = 'bounced' OR failureType = 'hard_bounce'
+      ORDER BY sentAt DESC LIMIT 10
+    `);
+
     return {
-      totalContacts, totalCampaigns, totalSent, totalOpened, successRate, openRate,
-      blacklistCount, unsubscribeCount,
-      recentCampaigns: this.resultToObjects(recentResult)
+      totalContacts, 
+      verifiedContacts,
+      bouncedContacts,
+      totalCampaigns, 
+      totalSent, 
+      totalBounced,
+      totalOpened,
+      totalClicked,
+      delivered,
+      deliveryRate,
+      bounceRate,
+      openRate,
+      clickRate,
+      blacklistCount, 
+      unsubscribeCount,
+      recentCampaigns: this.resultToObjects(recentResult),
+      recentBounces: this.resultToObjects(recentBounces)
+    };
+  }
+
+  // Get verification stats
+  getVerificationStats() {
+    const total = this.db.exec('SELECT COUNT(*) as count FROM contacts')[0]?.values[0][0] || 0;
+    const valid = this.db.exec('SELECT COUNT(*) as count FROM contacts WHERE verified = 1 AND verificationScore >= 80')[0]?.values[0][0] || 0;
+    const risky = this.db.exec('SELECT COUNT(*) as count FROM contacts WHERE verificationScore >= 50 AND verificationScore < 80')[0]?.values[0][0] || 0;
+    const invalid = this.db.exec('SELECT COUNT(*) as count FROM contacts WHERE verified = 0 AND verificationScore < 50 AND verificationScore > 0')[0]?.values[0][0] || 0;
+    const unverified = this.db.exec('SELECT COUNT(*) as count FROM contacts WHERE verificationScore = 0')[0]?.values[0][0] || 0;
+    const disposable = this.db.exec('SELECT COUNT(*) as count FROM contacts WHERE isDisposable = 1')[0]?.values[0][0] || 0;
+    const roleBased = this.db.exec('SELECT COUNT(*) as count FROM contacts WHERE isRoleBased = 1')[0]?.values[0][0] || 0;
+    const catchAll = this.db.exec('SELECT COUNT(*) as count FROM contacts WHERE isCatchAll = 1')[0]?.values[0][0] || 0;
+
+    return { total, valid, risky, invalid, unverified, disposable, roleBased, catchAll };
+  }
+
+  // Get bounce stats
+  getBounceStats() {
+    const totalBounces = this.db.exec(`SELECT COUNT(*) as count FROM campaign_logs WHERE status = 'bounced' OR failureType LIKE '%bounce%'`)[0]?.values[0][0] || 0;
+    const hardBounces = this.db.exec(`SELECT COUNT(*) as count FROM campaign_logs WHERE failureType = 'hard_bounce'`)[0]?.values[0][0] || 0;
+    const softBounces = this.db.exec(`SELECT COUNT(*) as count FROM campaign_logs WHERE failureType = 'soft_bounce'`)[0]?.values[0][0] || 0;
+    
+    const topReasons = this.db.exec(`
+      SELECT failureReason, COUNT(*) as count 
+      FROM campaign_logs 
+      WHERE failureReason IS NOT NULL 
+      GROUP BY failureReason 
+      ORDER BY count DESC 
+      LIMIT 5
+    `);
+
+    return {
+      total: totalBounces,
+      hard: hardBounces,
+      soft: softBounces,
+      topReasons: this.resultToObjects(topReasons)
     };
   }
 

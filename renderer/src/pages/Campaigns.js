@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Play, Pause, Square, Trash2, Eye, Send, BarChart3 } from 'lucide-react';
+import { Plus, Play, Pause, Square, Trash2, Eye, Send, BarChart3, Copy, Clock, Calendar } from 'lucide-react';
 import Modal from '../components/Modal';
 import { useToast } from '../components/ToastContext';
 import { useNavigate } from 'react-router-dom';
@@ -13,9 +13,12 @@ function Campaigns() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showProgressModal, setShowProgressModal] = useState(false);
   const [showLogsModal, setShowLogsModal] = useState(false);
+  const [showScheduleModal, setShowScheduleModal] = useState(false);
   const [selectedCampaign, setSelectedCampaign] = useState(null);
   const [campaignLogs, setCampaignLogs] = useState([]);
   const [progress, setProgress] = useState(null);
+  const [scheduleDate, setScheduleDate] = useState('');
+  const [scheduleTime, setScheduleTime] = useState('');
   const [newCampaign, setNewCampaign] = useState({
     name: '',
     listId: '',
@@ -74,9 +77,17 @@ function Campaigns() {
         return;
       }
 
-      const contacts = campaign.listId 
-        ? await window.electron.lists.getContacts(campaign.listId)
-        : await window.electron.contacts.getAll();
+      // Get contacts with tag filtering support
+      const filter = { listId: campaign.listId || '' };
+      if (campaign.selectedTags) {
+        try {
+          filter.tags = JSON.parse(campaign.selectedTags);
+        } catch (e) {
+          filter.tags = [];
+        }
+      }
+      
+      const contacts = await window.electron.contacts.getForCampaign(filter);
 
       if (contacts.length === 0) {
         addToast('No contacts to send to', 'error');
@@ -132,6 +143,67 @@ function Campaigns() {
       loadData();
     } catch (error) {
       addToast('Failed to delete campaign', 'error');
+    }
+  };
+
+  const handleDuplicate = async (campaign) => {
+    try {
+      const duplicated = {
+        name: `${campaign.name} (Copy)`,
+        subject: campaign.subject,
+        subjectB: campaign.subjectB,
+        content: campaign.content,
+        contentB: campaign.contentB,
+        isABTest: campaign.isABTest,
+        abTestPercent: campaign.abTestPercent,
+        listId: campaign.listId,
+        batchSize: campaign.batchSize,
+        delayMinutes: campaign.delayMinutes,
+        status: 'draft',
+        totalEmails: 0,
+        sentEmails: 0,
+        failedEmails: 0
+      };
+      await window.electron.campaigns.add(duplicated);
+      addToast('Campaign duplicated', 'success');
+      loadData();
+    } catch (error) {
+      addToast('Failed to duplicate campaign', 'error');
+    }
+  };
+
+  const openScheduleModal = (campaign) => {
+    setSelectedCampaign(campaign);
+    const now = new Date();
+    now.setHours(now.getHours() + 1);
+    setScheduleDate(now.toISOString().split('T')[0]);
+    setScheduleTime(now.toTimeString().slice(0, 5));
+    setShowScheduleModal(true);
+  };
+
+  const handleSchedule = async () => {
+    if (!scheduleDate || !scheduleTime) {
+      addToast('Please select date and time', 'error');
+      return;
+    }
+    try {
+      const scheduledAt = new Date(`${scheduleDate}T${scheduleTime}`).toISOString();
+      await window.electron.campaigns.schedule({ campaignId: selectedCampaign.id, scheduledAt });
+      addToast(`Campaign scheduled for ${new Date(scheduledAt).toLocaleString()}`, 'success');
+      setShowScheduleModal(false);
+      loadData();
+    } catch (error) {
+      addToast('Failed to schedule campaign', 'error');
+    }
+  };
+
+  const handleCancelSchedule = async (campaignId) => {
+    try {
+      await window.electron.campaigns.cancelSchedule(campaignId);
+      addToast('Schedule cancelled', 'success');
+      loadData();
+    } catch (error) {
+      addToast('Failed to cancel schedule', 'error');
     }
   };
 
@@ -221,14 +293,39 @@ function Campaigns() {
                     <td>
                       <div className="flex gap-2">
                         {campaign.status === 'draft' && (
+                          <>
+                            <button 
+                              className="btn btn-success btn-icon btn-sm"
+                              onClick={() => handleStartCampaign(campaign)}
+                              title="Start Now"
+                            >
+                              <Play size={14} />
+                            </button>
+                            <button 
+                              className="btn btn-outline btn-icon btn-sm"
+                              onClick={() => openScheduleModal(campaign)}
+                              title="Schedule"
+                            >
+                              <Calendar size={14} />
+                            </button>
+                          </>
+                        )}
+                        {campaign.status === 'scheduled' && (
                           <button 
-                            className="btn btn-success btn-icon btn-sm"
-                            onClick={() => handleStartCampaign(campaign)}
-                            title="Start"
+                            className="btn btn-warning btn-icon btn-sm"
+                            onClick={() => handleCancelSchedule(campaign.id)}
+                            title="Cancel Schedule"
                           >
-                            <Play size={14} />
+                            <Clock size={14} />
                           </button>
                         )}
+                        <button 
+                          className="btn btn-outline btn-icon btn-sm"
+                          onClick={() => handleDuplicate(campaign)}
+                          title="Duplicate"
+                        >
+                          <Copy size={14} />
+                        </button>
                         <button 
                           className="btn btn-outline btn-icon btn-sm"
                           onClick={() => navigate(`/analytics/${campaign.id}`)}
@@ -432,6 +529,45 @@ function Campaigns() {
             </table>
           </div>
         )}
+      </Modal>
+
+      {/* Schedule Modal */}
+      <Modal
+        isOpen={showScheduleModal}
+        onClose={() => setShowScheduleModal(false)}
+        title={`Schedule Campaign: ${selectedCampaign?.name}`}
+      >
+        <div className="form-group">
+          <label className="form-label">Date</label>
+          <input
+            type="date"
+            className="form-input"
+            value={scheduleDate}
+            onChange={(e) => setScheduleDate(e.target.value)}
+            min={new Date().toISOString().split('T')[0]}
+          />
+        </div>
+        <div className="form-group">
+          <label className="form-label">Time</label>
+          <input
+            type="time"
+            className="form-input"
+            value={scheduleTime}
+            onChange={(e) => setScheduleTime(e.target.value)}
+          />
+        </div>
+        {scheduleDate && scheduleTime && (
+          <div style={{ background: 'var(--bg-tertiary)', borderRadius: '8px', padding: '12px', marginTop: '16px' }}>
+            <div className="flex items-center gap-2">
+              <Calendar size={18} style={{ color: 'var(--accent)' }} />
+              <span>Campaign will start at: <strong>{new Date(`${scheduleDate}T${scheduleTime}`).toLocaleString()}</strong></span>
+            </div>
+          </div>
+        )}
+        <div className="flex justify-end gap-2 mt-4">
+          <button className="btn btn-outline" onClick={() => setShowScheduleModal(false)}>Cancel</button>
+          <button className="btn btn-primary" onClick={handleSchedule}><Clock size={16} /> Schedule</button>
+        </div>
       </Modal>
     </div>
   );

@@ -1,12 +1,15 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const http = require('http');
+const url = require('url');
 const XLSX = require('xlsx');
 const mammoth = require('mammoth');
 const Database = require('./database/db');
 const EmailService = require('./services/emailService');
 const VerificationService = require('./services/verificationService');
 const SpamService = require('./services/spamService');
+const TrackingService = require('./services/trackingService');
 
 // PDF parsing helper - extracts emails from PDF without canvas dependency
 const parsePdfForEmails = async (filePath) => {
@@ -35,6 +38,8 @@ let dbPath;
 let emailService;
 let verificationService;
 let spamService;
+let trackingService;
+let trackingServer;
 
 const isDev = !app.isPackaged;
 
@@ -74,6 +79,208 @@ async function initializeServices() {
   emailService = new EmailService(db);
   verificationService = new VerificationService();
   spamService = new SpamService(db);
+  trackingService = new TrackingService(db);
+  
+  // Start local tracking server
+  startTrackingServer();
+  
+  // Start campaign scheduler
+  startCampaignScheduler();
+}
+
+// ==================== CAMPAIGN SCHEDULER ====================
+let schedulerInterval = null;
+
+function startCampaignScheduler() {
+  // Check for scheduled campaigns every minute
+  schedulerInterval = setInterval(async () => {
+    try {
+      const scheduledCampaigns = db.getScheduledCampaigns();
+      const now = new Date();
+      
+      for (const campaign of scheduledCampaigns) {
+        const scheduledAt = new Date(campaign.scheduledAt);
+        if (scheduledAt <= now) {
+          console.log(`Starting scheduled campaign: ${campaign.name}`);
+          await runScheduledCampaign(campaign);
+        }
+      }
+    } catch (error) {
+      console.error('Scheduler error:', error);
+    }
+  }, 60000); // Check every minute
+  
+  // Also check immediately on startup
+  setTimeout(async () => {
+    try {
+      const scheduledCampaigns = db.getScheduledCampaigns();
+      const now = new Date();
+      
+      for (const campaign of scheduledCampaigns) {
+        const scheduledAt = new Date(campaign.scheduledAt);
+        if (scheduledAt <= now) {
+          console.log(`Starting scheduled campaign: ${campaign.name}`);
+          await runScheduledCampaign(campaign);
+        }
+      }
+    } catch (error) {
+      console.error('Startup scheduler check error:', error);
+    }
+  }, 5000);
+}
+
+async function runScheduledCampaign(campaign) {
+  try {
+    // Get SMTP settings
+    const smtpSettings = db.getSmtpSettings();
+    if (!smtpSettings?.host) {
+      console.error('No SMTP settings configured for scheduled campaign');
+      return;
+    }
+    
+    // Get contacts
+    const filter = { listId: campaign.listId || '' };
+    const contacts = db.getContactsForCampaign(filter);
+    
+    if (contacts.length === 0) {
+      console.log('No contacts for scheduled campaign');
+      db.updateCampaign({ ...campaign, status: 'completed', completedAt: new Date().toISOString() });
+      return;
+    }
+    
+    // Update campaign status
+    campaign.status = 'running';
+    campaign.startedAt = new Date().toISOString();
+    campaign.totalEmails = contacts.length;
+    db.updateCampaign(campaign);
+    
+    // Send emails
+    await emailService.sendCampaign(campaign, contacts, smtpSettings, (progress) => {
+      if (mainWindow) {
+        mainWindow.webContents.send('email:progress', progress);
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error running scheduled campaign:', error);
+    db.updateCampaign({ ...campaign, status: 'failed' });
+  }
+}
+
+// ==================== TRACKING SERVER ====================
+function startTrackingServer() {
+  const TRACKING_PORT = 3847;
+  
+  trackingServer = http.createServer(async (req, res) => {
+    const parsedUrl = url.parse(req.url, true);
+    const pathname = parsedUrl.pathname;
+    const query = parsedUrl.query;
+    
+    // Get client info for tracking
+    const metadata = {
+      userAgent: req.headers['user-agent'] || null,
+      ipAddress: req.headers['x-forwarded-for'] || req.socket.remoteAddress || null
+    };
+
+    // CORS headers for tracking
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+
+    try {
+      // Open tracking: /track/open/:campaignId/:recipientId/:trackingId
+      if (pathname.startsWith('/track/open/')) {
+        const parts = pathname.split('/').filter(Boolean);
+        const campaignId = parts[2];
+        const recipientId = parts[3];
+        const trackingId = parts[4];
+
+        if (campaignId && trackingId) {
+          await trackingService.recordOpen(campaignId, recipientId, trackingId, metadata);
+        }
+
+        // Return 1x1 transparent GIF
+        const pixel = trackingService.getTrackingPixelBuffer();
+        res.writeHead(200, {
+          'Content-Type': 'image/gif',
+          'Content-Length': pixel.length
+        });
+        res.end(pixel);
+        return;
+      }
+
+      // Click tracking: /track/click/:campaignId/:recipientId/:trackingId?url=...
+      if (pathname.startsWith('/track/click/')) {
+        const parts = pathname.split('/').filter(Boolean);
+        const campaignId = parts[2];
+        const recipientId = parts[3];
+        const trackingId = parts[4];
+        const redirectUrl = query.url ? decodeURIComponent(query.url) : null;
+
+        if (campaignId && trackingId && redirectUrl) {
+          await trackingService.recordClick(campaignId, recipientId, trackingId, redirectUrl, metadata);
+        }
+
+        // Redirect to original URL
+        if (redirectUrl) {
+          res.writeHead(302, { 'Location': redirectUrl });
+          res.end();
+        } else {
+          res.writeHead(400, { 'Content-Type': 'text/plain' });
+          res.end('Missing redirect URL');
+        }
+        return;
+      }
+
+      // Unsubscribe: /unsubscribe/:campaignId/:recipientId?email=...
+      if (pathname.startsWith('/unsubscribe/')) {
+        const parts = pathname.split('/').filter(Boolean);
+        const campaignId = parts[1];
+        const recipientId = parts[2];
+        const email = query.email ? decodeURIComponent(query.email) : null;
+
+        let success = false;
+        if (email) {
+          const result = await trackingService.handleUnsubscribe(campaignId, recipientId, email);
+          success = result.success;
+        }
+
+        // Return unsubscribe confirmation page
+        const html = trackingService.getUnsubscribePageHtml(success, email || 'Unknown');
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(html);
+        return;
+      }
+
+      // Health check
+      if (pathname === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', service: 'bulky-tracking' }));
+        return;
+      }
+
+      // 404 for unknown paths
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not Found');
+
+    } catch (error) {
+      console.error('Tracking server error:', error);
+      res.writeHead(500, { 'Content-Type': 'text/plain' });
+      res.end('Internal Server Error');
+    }
+  });
+
+  trackingServer.listen(TRACKING_PORT, '127.0.0.1', () => {
+    console.log(`Tracking server running on http://127.0.0.1:${TRACKING_PORT}`);
+  });
+
+  trackingServer.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.log(`Tracking port ${TRACKING_PORT} in use, trying next port...`);
+      trackingServer.listen(TRACKING_PORT + 1, '127.0.0.1');
+    } else {
+      console.error('Tracking server error:', err);
+    }
+  });
 }
 
 app.whenReady().then(async () => {
@@ -86,6 +293,7 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
+    if (trackingServer) trackingServer.close();
     if (db) db.close();
     app.quit();
   }
@@ -107,6 +315,8 @@ ipcMain.handle('contacts:addBulk', async (event, contacts) => db.addBulkContacts
 ipcMain.handle('contacts:update', async (event, contact) => db.updateContact(contact));
 ipcMain.handle('contacts:delete', async (event, ids) => db.deleteContacts(ids));
 ipcMain.handle('contacts:deleteByVerification', async (event, status) => db.deleteContactsByVerification(status));
+ipcMain.handle('contacts:getRecipientCount', async (event, filter) => db.getRecipientCount(filter));
+ipcMain.handle('contacts:getForCampaign', async (event, filter) => db.getContactsForCampaign(filter));
 
 
 // Contact Import (multiple formats) - FULL SERVER-SIDE PARSING
@@ -330,6 +540,7 @@ ipcMain.handle('blacklist:import', async () => {
 // ==================== UNSUBSCRIBES ====================
 ipcMain.handle('unsubscribes:getAll', async () => db.getAllUnsubscribes());
 ipcMain.handle('unsubscribes:add', async (event, { email, campaignId, reason }) => db.addUnsubscribe(email, campaignId, reason));
+ipcMain.handle('unsubscribes:remove', async (event, email) => db.removeUnsubscribe(email));
 ipcMain.handle('unsubscribes:check', async (event, email) => ({ isUnsubscribed: db.isUnsubscribed(email) }));
 
 // ==================== TEMPLATES ====================

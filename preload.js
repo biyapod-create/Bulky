@@ -15,6 +15,8 @@ contextBridge.exposeInMainWorld('electron', {
     update: (contact) => ipcRenderer.invoke('contacts:update', contact),
     delete: (ids) => ipcRenderer.invoke('contacts:delete', ids),
     deleteByVerification: (status) => ipcRenderer.invoke('contacts:deleteByVerification', status),
+    getRecipientCount: (filter) => ipcRenderer.invoke('contacts:getRecipientCount', filter),
+    getForCampaign: (filter) => ipcRenderer.invoke('contacts:getForCampaign', filter),
     import: () => ipcRenderer.invoke('contacts:import')
   },
 
@@ -48,6 +50,7 @@ contextBridge.exposeInMainWorld('electron', {
   unsubscribes: {
     getAll: () => ipcRenderer.invoke('unsubscribes:getAll'),
     add: (data) => ipcRenderer.invoke('unsubscribes:add', data),
+    remove: (email) => ipcRenderer.invoke('unsubscribes:remove', email),
     check: (email) => ipcRenderer.invoke('unsubscribes:check', email)
   },
 
