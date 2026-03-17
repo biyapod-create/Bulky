@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const url = require('url');
+const crypto = require('crypto');
 const XLSX = require('xlsx');
 const mammoth = require('mammoth');
 const Database = require('./database/db');
@@ -11,16 +12,17 @@ const VerificationService = require('./services/verificationService');
 const SpamService = require('./services/spamService');
 const TrackingService = require('./services/trackingService');
 
+// HMAC secret for unsubscribe token validation
+const UNSUBSCRIBE_SECRET = crypto.randomBytes(32).toString('hex');
+
 // PDF parsing helper - extracts emails from PDF without canvas dependency
 const parsePdfForEmails = async (filePath) => {
   try {
-    // Dynamic import to avoid startup issues
     const pdfParse = require('pdf-parse/lib/pdf-parse');
     const dataBuffer = fs.readFileSync(filePath);
     const data = await pdfParse(dataBuffer);
     return data.text || '';
   } catch (err) {
-    // Fallback: try to read raw bytes and extract emails with regex
     console.error('PDF parse error, using fallback:', err.message);
     try {
       const buffer = fs.readFileSync(filePath);
@@ -31,6 +33,52 @@ const parsePdfForEmails = async (filePath) => {
     }
   }
 };
+
+// Generate HMAC token for unsubscribe links
+function generateUnsubscribeToken(email, campaignId) {
+  return crypto.createHmac('sha256', UNSUBSCRIBE_SECRET)
+    .update(`${email}:${campaignId}`)
+    .digest('hex');
+}
+
+// Validate HMAC token for unsubscribe requests
+function validateUnsubscribeToken(email, campaignId, token) {
+  const expected = generateUnsubscribeToken(email, campaignId);
+  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(token || ''.padEnd(expected.length, '0')));
+}
+
+// Rate limiter for verification endpoint
+const verifyRateLimiter = {
+  requests: new Map(),
+  windowMs: 60000, // 1 minute window
+  maxRequests: 30,  // max 30 requests per minute per IP
+
+  isAllowed(ip) {
+    const now = Date.now();
+    const entry = this.requests.get(ip);
+    if (!entry || now - entry.windowStart > this.windowMs) {
+      this.requests.set(ip, { windowStart: now, count: 1 });
+      return true;
+    }
+    if (entry.count >= this.maxRequests) {
+      return false;
+    }
+    entry.count++;
+    return true;
+  },
+
+  cleanup() {
+    const now = Date.now();
+    for (const [ip, entry] of this.requests) {
+      if (now - entry.windowStart > this.windowMs) {
+        this.requests.delete(ip);
+      }
+    }
+  }
+};
+
+// Clean up rate limiter periodically
+setInterval(() => verifyRateLimiter.cleanup(), 120000);
 
 let mainWindow;
 let db;
@@ -73,116 +121,113 @@ function createWindow() {
 async function initializeServices() {
   const userDataPath = app.getPath('userData');
   dbPath = path.join(userDataPath, 'bulky.db');
-  
+
   db = new Database(dbPath);
   await db.init();
   emailService = new EmailService(db);
   verificationService = new VerificationService();
   spamService = new SpamService(db);
   trackingService = new TrackingService(db);
-  
-  // Start local tracking server
+
   startTrackingServer();
-  
-  // Start campaign scheduler
   startCampaignScheduler();
+}
+
+// ==================== SAFE IPC HANDLER WRAPPER ====================
+function safeHandle(channel, handler) {
+  ipcMain.handle(channel, async (event, ...args) => {
+    try {
+      return await handler(event, ...args);
+    } catch (error) {
+      console.error(`IPC error in ${channel}:`, error);
+      return { success: false, error: error.message || 'An unexpected error occurred' };
+    }
+  });
 }
 
 // ==================== CAMPAIGN SCHEDULER ====================
 let schedulerInterval = null;
 
+async function checkScheduledCampaigns() {
+  try {
+    const scheduledCampaigns = db.getScheduledCampaigns();
+    const now = new Date();
+
+    for (const campaign of scheduledCampaigns) {
+      const scheduledAt = new Date(campaign.scheduledAt);
+      if (scheduledAt <= now) {
+        console.log(`Starting scheduled campaign: ${campaign.name}`);
+        try {
+          await runScheduledCampaign(campaign);
+        } catch (campaignError) {
+          console.error(`Failed to run scheduled campaign ${campaign.id}:`, campaignError);
+          try {
+            db.updateCampaign({ ...campaign, status: 'failed', error: campaignError.message });
+          } catch (dbError) {
+            console.error('Failed to update campaign status:', dbError);
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Scheduler error:', error);
+  }
+}
+
 function startCampaignScheduler() {
-  // Check for scheduled campaigns every minute
-  schedulerInterval = setInterval(async () => {
-    try {
-      const scheduledCampaigns = db.getScheduledCampaigns();
-      const now = new Date();
-      
-      for (const campaign of scheduledCampaigns) {
-        const scheduledAt = new Date(campaign.scheduledAt);
-        if (scheduledAt <= now) {
-          console.log(`Starting scheduled campaign: ${campaign.name}`);
-          await runScheduledCampaign(campaign);
-        }
-      }
-    } catch (error) {
-      console.error('Scheduler error:', error);
-    }
-  }, 60000); // Check every minute
-  
+  schedulerInterval = setInterval(checkScheduledCampaigns, 60000);
+
   // Also check immediately on startup
-  setTimeout(async () => {
-    try {
-      const scheduledCampaigns = db.getScheduledCampaigns();
-      const now = new Date();
-      
-      for (const campaign of scheduledCampaigns) {
-        const scheduledAt = new Date(campaign.scheduledAt);
-        if (scheduledAt <= now) {
-          console.log(`Starting scheduled campaign: ${campaign.name}`);
-          await runScheduledCampaign(campaign);
-        }
-      }
-    } catch (error) {
-      console.error('Startup scheduler check error:', error);
-    }
-  }, 5000);
+  setTimeout(checkScheduledCampaigns, 5000);
 }
 
 async function runScheduledCampaign(campaign) {
-  try {
-    // Get SMTP settings
-    const smtpSettings = db.getSmtpSettings();
-    if (!smtpSettings?.host) {
-      console.error('No SMTP settings configured for scheduled campaign');
-      return;
-    }
-    
-    // Get contacts
-    const filter = { listId: campaign.listId || '' };
-    const contacts = db.getContactsForCampaign(filter);
-    
-    if (contacts.length === 0) {
-      console.log('No contacts for scheduled campaign');
-      db.updateCampaign({ ...campaign, status: 'completed', completedAt: new Date().toISOString() });
-      return;
-    }
-    
-    // Update campaign status
-    campaign.status = 'running';
-    campaign.startedAt = new Date().toISOString();
-    campaign.totalEmails = contacts.length;
-    db.updateCampaign(campaign);
-    
-    // Send emails
-    await emailService.sendCampaign(campaign, contacts, smtpSettings, (progress) => {
-      if (mainWindow) {
-        mainWindow.webContents.send('email:progress', progress);
-      }
-    });
-    
-  } catch (error) {
-    console.error('Error running scheduled campaign:', error);
-    db.updateCampaign({ ...campaign, status: 'failed' });
+  // Get SMTP settings
+  const smtpSettings = db.getSmtpSettings();
+  if (!smtpSettings?.host) {
+    console.error('No SMTP settings configured for scheduled campaign');
+    db.updateCampaign({ ...campaign, status: 'failed', error: 'No SMTP settings configured' });
+    return;
   }
+
+  // Get contacts
+  const filter = { listId: campaign.listId || '' };
+  const contacts = db.getContactsForCampaign(filter);
+
+  if (contacts.length === 0) {
+    console.log('No contacts for scheduled campaign');
+    db.updateCampaign({ ...campaign, status: 'completed', completedAt: new Date().toISOString() });
+    return;
+  }
+
+  // Update campaign status
+  campaign.status = 'running';
+  campaign.startedAt = new Date().toISOString();
+  campaign.totalEmails = contacts.length;
+  db.updateCampaign(campaign);
+
+  // Send emails
+  await emailService.sendCampaign(campaign, contacts, smtpSettings, (progress) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('email:progress', progress);
+    }
+  });
 }
 
 // ==================== TRACKING SERVER ====================
 function startTrackingServer() {
   const TRACKING_PORT = 3847;
-  
+
   trackingServer = http.createServer(async (req, res) => {
     const parsedUrl = url.parse(req.url, true);
     const pathname = parsedUrl.pathname;
     const query = parsedUrl.query;
-    
-    // Get client info for tracking
+
     const metadata = {
       userAgent: req.headers['user-agent'] || null,
       ipAddress: req.headers['x-forwarded-for'] || req.socket.remoteAddress || null
     };
 
-    // CORS headers for tracking
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
 
@@ -195,10 +240,13 @@ function startTrackingServer() {
         const trackingId = parts[4];
 
         if (campaignId && trackingId) {
-          await trackingService.recordOpen(campaignId, recipientId, trackingId, metadata);
+          try {
+            await trackingService.recordOpen(campaignId, recipientId, trackingId, metadata);
+          } catch (trackErr) {
+            console.error('Failed to record open event:', trackErr);
+          }
         }
 
-        // Return 1x1 transparent GIF
         const pixel = trackingService.getTrackingPixelBuffer();
         res.writeHead(200, {
           'Content-Type': 'image/gif',
@@ -217,13 +265,28 @@ function startTrackingServer() {
         const redirectUrl = query.url ? decodeURIComponent(query.url) : null;
 
         if (campaignId && trackingId && redirectUrl) {
-          await trackingService.recordClick(campaignId, recipientId, trackingId, redirectUrl, metadata);
+          try {
+            await trackingService.recordClick(campaignId, recipientId, trackingId, redirectUrl, metadata);
+          } catch (trackErr) {
+            console.error('Failed to record click event:', trackErr);
+          }
         }
 
-        // Redirect to original URL
         if (redirectUrl) {
-          res.writeHead(302, { 'Location': redirectUrl });
-          res.end();
+          // Validate redirect URL to prevent open redirect attacks
+          try {
+            const parsed = new URL(redirectUrl);
+            if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+              res.writeHead(302, { 'Location': redirectUrl });
+              res.end();
+            } else {
+              res.writeHead(400, { 'Content-Type': 'text/plain' });
+              res.end('Invalid redirect URL protocol');
+            }
+          } catch (urlErr) {
+            res.writeHead(400, { 'Content-Type': 'text/plain' });
+            res.end('Invalid redirect URL');
+          }
         } else {
           res.writeHead(400, { 'Content-Type': 'text/plain' });
           res.end('Missing redirect URL');
@@ -231,23 +294,51 @@ function startTrackingServer() {
         return;
       }
 
-      // Unsubscribe: /unsubscribe/:campaignId/:recipientId?email=...
+      // Unsubscribe: /unsubscribe/:campaignId/:recipientId?email=...&token=...
       if (pathname.startsWith('/unsubscribe/')) {
         const parts = pathname.split('/').filter(Boolean);
         const campaignId = parts[1];
         const recipientId = parts[2];
         const email = query.email ? decodeURIComponent(query.email) : null;
+        const token = query.token || null;
 
         let success = false;
         if (email) {
-          const result = await trackingService.handleUnsubscribe(campaignId, recipientId, email);
-          success = result.success;
+          // Validate HMAC token if provided
+          if (token) {
+            const isValid = validateUnsubscribeToken(email, campaignId, token);
+            if (isValid) {
+              try {
+                const result = await trackingService.handleUnsubscribe(campaignId, recipientId, email);
+                success = result.success;
+              } catch (unsubErr) {
+                console.error('Failed to process unsubscribe:', unsubErr);
+              }
+            } else {
+              console.warn(`Invalid unsubscribe token for email: ${email}`);
+            }
+          } else {
+            // Fallback: allow unsubscribe without token for backwards compatibility
+            // but log a warning
+            console.warn(`Unsubscribe request without token for email: ${email}`);
+            try {
+              const result = await trackingService.handleUnsubscribe(campaignId, recipientId, email);
+              success = result.success;
+            } catch (unsubErr) {
+              console.error('Failed to process unsubscribe:', unsubErr);
+            }
+          }
         }
 
-        // Return unsubscribe confirmation page
-        const html = trackingService.getUnsubscribePageHtml(success, email || 'Unknown');
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(html);
+        try {
+          const html = trackingService.getUnsubscribePageHtml(success, email || 'Unknown');
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.end(html);
+        } catch (htmlErr) {
+          console.error('Failed to generate unsubscribe page:', htmlErr);
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.end('<html><body><h1>Unsubscribe processed</h1></body></html>');
+        }
         return;
       }
 
@@ -264,8 +355,10 @@ function startTrackingServer() {
 
     } catch (error) {
       console.error('Tracking server error:', error);
-      res.writeHead(500, { 'Content-Type': 'text/plain' });
-      res.end('Internal Server Error');
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('Internal Server Error');
+      }
     }
   });
 
@@ -283,6 +376,11 @@ function startTrackingServer() {
   });
 }
 
+// Expose token generation for use in email templates
+function getUnsubscribeTokenForEmail(email, campaignId) {
+  return generateUnsubscribeToken(email, campaignId);
+}
+
 app.whenReady().then(async () => {
   await initializeServices();
   createWindow();
@@ -293,6 +391,7 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
+    if (schedulerInterval) clearInterval(schedulerInterval);
     if (trackingServer) trackingServer.close();
     if (db) db.close();
     app.quit();
@@ -300,27 +399,87 @@ app.on('window-all-closed', () => {
 });
 
 // ==================== WINDOW CONTROLS ====================
-ipcMain.handle('window:minimize', () => mainWindow.minimize());
-ipcMain.handle('window:maximize', () => {
-  if (mainWindow.isMaximized()) mainWindow.unmaximize();
-  else mainWindow.maximize();
+ipcMain.handle('window:minimize', () => {
+  try { mainWindow.minimize(); } catch (e) { console.error('Window minimize error:', e); }
 });
-ipcMain.handle('window:close', () => mainWindow.close());
+ipcMain.handle('window:maximize', () => {
+  try {
+    if (mainWindow.isMaximized()) mainWindow.unmaximize();
+    else mainWindow.maximize();
+  } catch (e) { console.error('Window maximize error:', e); }
+});
+ipcMain.handle('window:close', () => {
+  try { mainWindow.close(); } catch (e) { console.error('Window close error:', e); }
+});
 
 // ==================== CONTACTS ====================
-ipcMain.handle('contacts:getAll', async () => db.getAllContacts());
-ipcMain.handle('contacts:getFiltered', async (event, filter) => db.getContactsByFilter(filter));
-ipcMain.handle('contacts:add', async (event, contact) => db.addContact(contact));
-ipcMain.handle('contacts:addBulk', async (event, contacts) => db.addBulkContacts(contacts));
-ipcMain.handle('contacts:update', async (event, contact) => db.updateContact(contact));
-ipcMain.handle('contacts:delete', async (event, ids) => db.deleteContacts(ids));
-ipcMain.handle('contacts:deleteByVerification', async (event, status) => db.deleteContactsByVerification(status));
-ipcMain.handle('contacts:getRecipientCount', async (event, filter) => db.getRecipientCount(filter));
-ipcMain.handle('contacts:getForCampaign', async (event, filter) => db.getContactsForCampaign(filter));
+safeHandle('contacts:getAll', async () => db.getAllContacts());
+safeHandle('contacts:getFiltered', async (event, filter) => db.getContactsByFilter(filter));
+safeHandle('contacts:add', async (event, contact) => db.addContact(contact));
+safeHandle('contacts:addBulk', async (event, contacts) => db.addBulkContacts(contacts));
+safeHandle('contacts:update', async (event, contact) => db.updateContact(contact));
+safeHandle('contacts:delete', async (event, ids) => db.deleteContacts(ids));
+safeHandle('contacts:deleteByVerification', async (event, status) => db.deleteContactsByVerification(status));
+safeHandle('contacts:getRecipientCount', async (event, filter) => db.getRecipientCount(filter));
+safeHandle('contacts:getForCampaign', async (event, filter) => db.getContactsForCampaign(filter));
 
+// Paginated contacts
+safeHandle('contacts:getPage', async (event, { page, pageSize, filter, sortBy, sortOrder }) => {
+  const safePage = Math.max(1, parseInt(page) || 1);
+  const safePageSize = Math.min(500, Math.max(1, parseInt(pageSize) || 50));
+  const offset = (safePage - 1) * safePageSize;
+
+  const contacts = db.getContactsByFilter(filter || {});
+
+  // Sort if requested
+  if (sortBy) {
+    const order = sortOrder === 'desc' ? -1 : 1;
+    contacts.sort((a, b) => {
+      const aVal = a[sortBy] || '';
+      const bVal = b[sortBy] || '';
+      if (typeof aVal === 'string') return aVal.localeCompare(bVal) * order;
+      return (aVal - bVal) * order;
+    });
+  }
+
+  const total = contacts.length;
+  const paginated = contacts.slice(offset, offset + safePageSize);
+
+  return {
+    contacts: paginated,
+    total,
+    page: safePage,
+    pageSize: safePageSize,
+    totalPages: Math.ceil(total / safePageSize)
+  };
+});
+
+// Contact statistics
+safeHandle('contacts:getStats', async () => {
+  const allContacts = db.getAllContacts();
+  const total = allContacts.length;
+  const verified = allContacts.filter(c => c.verified === 'valid' || c.verified === 'verified').length;
+  const invalid = allContacts.filter(c => c.verified === 'invalid').length;
+  const unverified = allContacts.filter(c => !c.verified || c.verified === 'unknown').length;
+  const risky = allContacts.filter(c => c.verified === 'risky' || c.verified === 'catch-all').length;
+  const lists = {};
+  allContacts.forEach(c => {
+    const listName = c.listName || 'No List';
+    lists[listName] = (lists[listName] || 0) + 1;
+  });
+
+  return {
+    total,
+    verified,
+    invalid,
+    unverified,
+    risky,
+    byList: lists
+  };
+});
 
 // Contact Import (multiple formats) - FULL SERVER-SIDE PARSING
-ipcMain.handle('contacts:import', async () => {
+safeHandle('contacts:import', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openFile'],
     filters: [
@@ -338,11 +497,9 @@ ipcMain.handle('contacts:import', async () => {
     const filePath = result.filePaths[0];
     const ext = path.extname(filePath).toLowerCase();
     let parsed = [];
-    
-    // Email extraction regex
+
     const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-    
-    // Extract emails from raw text (for PDF, Word, or unstructured TXT)
+
     const extractEmailsFromText = (text) => {
       const emails = text.match(emailRegex) || [];
       const unique = [...new Set(emails.map(e => e.toLowerCase()))];
@@ -350,7 +507,6 @@ ipcMain.handle('contacts:import', async () => {
     };
 
     try {
-      // CSV Parsing helper
       const parseCSVLine = (line) => {
         const cols = [];
         let current = '';
@@ -367,24 +523,19 @@ ipcMain.handle('contacts:import', async () => {
         return cols;
       };
 
-      // Check if header is a date/time column (to skip for name/company fields)
       const isDateColumn = (h) => {
         const datePatterns = ['date', 'time', 'created', 'updated', 'modified', 'timestamp', '_at', 'registered', 'joined', 'added', 'subscribed'];
         return datePatterns.some(p => h.includes(p));
       };
-      
-      // Check if a value looks like a timestamp/date
+
       const isDateValue = (val) => {
         if (!val) return false;
-        // ISO date pattern: 2025-12-12T20:37:17 or similar
         if (/^\d{4}-\d{2}-\d{2}/.test(val)) return true;
-        // Other common date formats
         if (/^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(val)) return true;
         if (/^\d{1,2}-\d{1,2}-\d{2,4}/.test(val)) return true;
         return false;
       };
-      
-      // Clean value - return empty string if it's a date/timestamp
+
       const cleanValue = (val) => {
         if (!val) return '';
         const trimmed = val.trim();
@@ -394,15 +545,13 @@ ipcMain.handle('contacts:import', async () => {
 
       const findColumnIndex = (headers, patterns) => headers.findIndex(h => patterns.some(p => h.includes(p)) && !isDateColumn(h));
 
-      // CSV / TXT files
       if (ext === '.csv' || ext === '.txt') {
         const content = fs.readFileSync(filePath, 'utf-8');
         const lines = content.split(/[\r\n]+/).filter(l => l.trim());
-        
-        // Check if it's structured (has headers) or raw text
+
         const firstLine = lines[0] || '';
         const hasHeaders = firstLine.toLowerCase().includes('email') || firstLine.includes('@') === false;
-        
+
         if (hasHeaders && lines.length >= 2) {
           const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase());
           const emailIdx = findColumnIndex(headers, ['email', 'e-mail', 'emailaddress']);
@@ -410,7 +559,7 @@ ipcMain.handle('contacts:import', async () => {
           const lnameIdx = findColumnIndex(headers, ['last', 'lname', 'lastname', 'surname', 'family']);
           const companyIdx = findColumnIndex(headers, ['company', 'org', 'organization', 'business']);
           const phoneIdx = findColumnIndex(headers, ['phone', 'mobile', 'tel', 'cell']);
-          
+
           for (let i = 1; i < lines.length; i++) {
             const cols = parseCSVLine(lines[i]);
             const email = (cols[emailIdx >= 0 ? emailIdx : 0] || '').trim().toLowerCase();
@@ -425,11 +574,9 @@ ipcMain.handle('contacts:import', async () => {
             }
           }
         } else {
-          // Raw text - just extract emails
           parsed = extractEmailsFromText(content);
         }
       }
-      // JSON files
       else if (ext === '.json') {
         const content = fs.readFileSync(filePath, 'utf-8');
         const json = JSON.parse(content);
@@ -442,13 +589,12 @@ ipcMain.handle('contacts:import', async () => {
           phone: c.phone || c.mobile || c.tel || ''
         }));
       }
-      // Excel files
       else if (ext === '.xlsx' || ext === '.xls') {
         const workbook = XLSX.readFile(filePath);
         const sheetName = workbook.SheetNames[0];
         const sheet = workbook.Sheets[sheetName];
         const data = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-        
+
         if (data.length >= 1) {
           const headers = data[0].map(h => String(h || '').toLowerCase());
           const emailIdx = findColumnIndex(headers, ['email', 'e-mail', 'emailaddress']);
@@ -456,7 +602,7 @@ ipcMain.handle('contacts:import', async () => {
           const lnameIdx = findColumnIndex(headers, ['last', 'lname', 'lastname', 'surname', 'family']);
           const companyIdx = findColumnIndex(headers, ['company', 'org', 'organization', 'business']);
           const phoneIdx = findColumnIndex(headers, ['phone', 'mobile', 'tel', 'cell']);
-          
+
           for (let i = 1; i < data.length; i++) {
             const row = data[i];
             const email = String(row[emailIdx >= 0 ? emailIdx : 0] || '').trim().toLowerCase();
@@ -472,17 +618,14 @@ ipcMain.handle('contacts:import', async () => {
           }
         }
       }
-      // PDF files
       else if (ext === '.pdf') {
         const pdfText = await parsePdfForEmails(filePath);
         parsed = extractEmailsFromText(pdfText);
       }
-      // Word files (.docx)
       else if (ext === '.docx') {
-        const result = await mammoth.extractRawText({ path: filePath });
-        parsed = extractEmailsFromText(result.value);
+        const docResult = await mammoth.extractRawText({ path: filePath });
+        parsed = extractEmailsFromText(docResult.value);
       }
-      // Old Word files (.doc) - try as text
       else if (ext === '.doc') {
         try {
           const content = fs.readFileSync(filePath, 'utf-8');
@@ -493,7 +636,7 @@ ipcMain.handle('contacts:import', async () => {
       }
 
       if (parsed.length === 0) return { success: false, error: 'No valid email addresses found in file' };
-      
+
       return { success: true, contacts: parsed, filePath, extension: ext, count: parsed.length };
     } catch (error) {
       return { success: false, error: 'Failed to parse file: ' + error.message };
@@ -503,26 +646,26 @@ ipcMain.handle('contacts:import', async () => {
 });
 
 // ==================== TAGS ====================
-ipcMain.handle('tags:getAll', async () => db.getAllTags());
-ipcMain.handle('tags:add', async (event, tag) => db.addTag(tag));
-ipcMain.handle('tags:delete', async (event, id) => db.deleteTag(id));
+safeHandle('tags:getAll', async () => db.getAllTags());
+safeHandle('tags:add', async (event, tag) => db.addTag(tag));
+safeHandle('tags:delete', async (event, id) => db.deleteTag(id));
 
 // ==================== LISTS ====================
-ipcMain.handle('lists:getAll', async () => db.getAllLists());
-ipcMain.handle('lists:add', async (event, list) => db.addList(list));
-ipcMain.handle('lists:update', async (event, list) => db.updateList(list));
-ipcMain.handle('lists:delete', async (event, id) => db.deleteList(id));
-ipcMain.handle('lists:getContacts', async (event, listId) => db.getContactsByList(listId));
+safeHandle('lists:getAll', async () => db.getAllLists());
+safeHandle('lists:add', async (event, list) => db.addList(list));
+safeHandle('lists:update', async (event, list) => db.updateList(list));
+safeHandle('lists:delete', async (event, id) => db.deleteList(id));
+safeHandle('lists:getContacts', async (event, listId) => db.getContactsByList(listId));
 
 // ==================== BLACKLIST ====================
-ipcMain.handle('blacklist:getAll', async () => db.getAllBlacklist());
-ipcMain.handle('blacklist:add', async (event, entry) => db.addToBlacklist(entry));
-ipcMain.handle('blacklist:addBulk', async (event, entries) => db.addBulkToBlacklist(entries));
-ipcMain.handle('blacklist:remove', async (event, id) => db.removeFromBlacklist(id));
-ipcMain.handle('blacklist:check', async (event, email) => ({ isBlacklisted: db.isBlacklisted(email) }));
+safeHandle('blacklist:getAll', async () => db.getAllBlacklist());
+safeHandle('blacklist:add', async (event, entry) => db.addToBlacklist(entry));
+safeHandle('blacklist:addBulk', async (event, entries) => db.addBulkToBlacklist(entries));
+safeHandle('blacklist:remove', async (event, id) => db.removeFromBlacklist(id));
+safeHandle('blacklist:check', async (event, email) => ({ isBlacklisted: db.isBlacklisted(email) }));
 
 // Import blacklist from file
-ipcMain.handle('blacklist:import', async () => {
+safeHandle('blacklist:import', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openFile'],
     filters: [{ name: 'Text/CSV', extensions: ['csv', 'txt'] }]
@@ -538,84 +681,280 @@ ipcMain.handle('blacklist:import', async () => {
 });
 
 // ==================== UNSUBSCRIBES ====================
-ipcMain.handle('unsubscribes:getAll', async () => db.getAllUnsubscribes());
-ipcMain.handle('unsubscribes:add', async (event, { email, campaignId, reason }) => db.addUnsubscribe(email, campaignId, reason));
-ipcMain.handle('unsubscribes:remove', async (event, email) => db.removeUnsubscribe(email));
-ipcMain.handle('unsubscribes:check', async (event, email) => ({ isUnsubscribed: db.isUnsubscribed(email) }));
+safeHandle('unsubscribes:getAll', async () => db.getAllUnsubscribes());
+safeHandle('unsubscribes:add', async (event, { email, campaignId, reason }) => db.addUnsubscribe(email, campaignId, reason));
+safeHandle('unsubscribes:remove', async (event, email) => db.removeUnsubscribe(email));
+safeHandle('unsubscribes:check', async (event, email) => ({ isUnsubscribed: db.isUnsubscribed(email) }));
 
 // ==================== TEMPLATES ====================
-ipcMain.handle('templates:getAll', async () => db.getAllTemplates());
-ipcMain.handle('templates:getByCategory', async (event, category) => db.getTemplatesByCategory(category));
-ipcMain.handle('templates:add', async (event, template) => db.addTemplate(template));
-ipcMain.handle('templates:update', async (event, template) => db.updateTemplate(template));
-ipcMain.handle('templates:delete', async (event, id) => db.deleteTemplate(id));
+safeHandle('templates:getAll', async () => db.getAllTemplates());
+safeHandle('templates:getByCategory', async (event, category) => db.getTemplatesByCategory(category));
+safeHandle('templates:add', async (event, template) => db.addTemplate(template));
+safeHandle('templates:update', async (event, template) => db.updateTemplate(template));
+safeHandle('templates:delete', async (event, id) => db.deleteTemplate(id));
+
+// Get template with its blocks (for drag-and-drop builder)
+safeHandle('templates:getWithBlocks', async (event, templateId) => {
+  const templates = db.getAllTemplates();
+  const template = templates.find(t => t.id === templateId);
+  if (!template) {
+    return { success: false, error: 'Template not found' };
+  }
+  // Blocks are stored as JSON string in template.blocks field
+  let blocks = [];
+  if (template.blocks) {
+    try {
+      blocks = JSON.parse(template.blocks);
+    } catch (e) {
+      blocks = [];
+    }
+  }
+  return { success: true, template, blocks };
+});
+
+// Save template blocks (for drag-and-drop builder)
+safeHandle('templates:saveBlocks', async (event, { templateId, blocks }) => {
+  if (!templateId) {
+    return { success: false, error: 'Template ID is required' };
+  }
+  if (!Array.isArray(blocks)) {
+    return { success: false, error: 'Blocks must be an array' };
+  }
+  const templates = db.getAllTemplates();
+  const template = templates.find(t => t.id === templateId);
+  if (!template) {
+    return { success: false, error: 'Template not found' };
+  }
+  template.blocks = JSON.stringify(blocks);
+  db.updateTemplate(template);
+  return { success: true };
+});
+
+// Get unique template categories
+safeHandle('templates:getCategories', async () => {
+  const templates = db.getAllTemplates();
+  const categories = [...new Set(templates.map(t => t.category).filter(Boolean))];
+  return categories.sort();
+});
 
 // ==================== SMTP ACCOUNTS (Multiple) ====================
-ipcMain.handle('smtpAccounts:getAll', async () => db.getAllSmtpAccounts());
-ipcMain.handle('smtpAccounts:getActive', async () => db.getActiveSmtpAccounts());
-ipcMain.handle('smtpAccounts:add', async (event, account) => db.addSmtpAccount(account));
-ipcMain.handle('smtpAccounts:update', async (event, account) => db.updateSmtpAccount(account));
-ipcMain.handle('smtpAccounts:delete', async (event, id) => db.deleteSmtpAccount(id));
-ipcMain.handle('smtpAccounts:test', async (event, account) => emailService.testConnection(account));
+safeHandle('smtpAccounts:getAll', async () => db.getAllSmtpAccounts());
+safeHandle('smtpAccounts:getActive', async () => db.getActiveSmtpAccounts());
+safeHandle('smtpAccounts:add', async (event, account) => db.addSmtpAccount(account));
+safeHandle('smtpAccounts:update', async (event, account) => db.updateSmtpAccount(account));
+safeHandle('smtpAccounts:delete', async (event, id) => db.deleteSmtpAccount(id));
+safeHandle('smtpAccounts:test', async (event, account) => emailService.testConnection(account));
 
 // Legacy SMTP settings
-ipcMain.handle('smtp:get', async () => db.getSmtpSettings());
-ipcMain.handle('smtp:save', async (event, settings) => db.saveSmtpSettings(settings));
-ipcMain.handle('smtp:test', async (event, settings) => emailService.testConnection(settings));
-
+safeHandle('smtp:get', async () => db.getSmtpSettings());
+safeHandle('smtp:save', async (event, settings) => db.saveSmtpSettings(settings));
+safeHandle('smtp:test', async (event, settings) => emailService.testConnection(settings));
 
 // ==================== CAMPAIGNS ====================
-ipcMain.handle('campaigns:getAll', async () => db.getAllCampaigns());
-ipcMain.handle('campaigns:getScheduled', async () => db.getScheduledCampaigns());
-ipcMain.handle('campaigns:add', async (event, campaign) => db.addCampaign(campaign));
-ipcMain.handle('campaigns:update', async (event, campaign) => db.updateCampaign(campaign));
-ipcMain.handle('campaigns:delete', async (event, id) => db.deleteCampaign(id));
-ipcMain.handle('campaigns:getLogs', async (event, campaignId) => db.getCampaignLogs(campaignId));
-ipcMain.handle('campaigns:getAnalytics', async (event, campaignId) => db.getCampaignAnalytics(campaignId));
-ipcMain.handle('campaigns:schedule', async (event, { campaignId, scheduledAt, timezone }) => 
+safeHandle('campaigns:getAll', async () => db.getAllCampaigns());
+safeHandle('campaigns:getScheduled', async () => db.getScheduledCampaigns());
+safeHandle('campaigns:add', async (event, campaign) => db.addCampaign(campaign));
+safeHandle('campaigns:update', async (event, campaign) => db.updateCampaign(campaign));
+safeHandle('campaigns:delete', async (event, id) => db.deleteCampaign(id));
+safeHandle('campaigns:getLogs', async (event, campaignId) => db.getCampaignLogs(campaignId));
+safeHandle('campaigns:getAnalytics', async (event, campaignId) => db.getCampaignAnalytics(campaignId));
+safeHandle('campaigns:schedule', async (event, { campaignId, scheduledAt, timezone }) =>
   db.scheduleCampaign(campaignId, scheduledAt, timezone));
-ipcMain.handle('campaigns:cancelSchedule', async (event, campaignId) => db.cancelScheduledCampaign(campaignId));
+safeHandle('campaigns:cancelSchedule', async (event, campaignId) => db.cancelScheduledCampaign(campaignId));
 
 // ==================== EMAIL SENDING ====================
-ipcMain.handle('email:send', async (event, { campaign, contacts, settings }) => {
+safeHandle('email:send', async (event, { campaign, contacts, settings }) => {
+  // Validate campaign data
+  if (!campaign) {
+    return { success: false, error: 'Campaign data is required' };
+  }
+  if (!contacts || !Array.isArray(contacts) || contacts.length === 0) {
+    return { success: false, error: 'At least one contact is required' };
+  }
+  if (!settings || !settings.host) {
+    return { success: false, error: 'SMTP settings with a valid host are required' };
+  }
+
+  // Validate and sanitize batch size
+  if (campaign.batchSize !== undefined) {
+    const batchSize = parseInt(campaign.batchSize);
+    if (isNaN(batchSize) || batchSize < 1) {
+      return { success: false, error: 'Batch size must be a positive number' };
+    }
+    if (batchSize > 1000) {
+      return { success: false, error: 'Batch size cannot exceed 1000' };
+    }
+    campaign.batchSize = batchSize;
+  }
+
+  // Validate and sanitize delay between batches
+  if (campaign.delayMinutes !== undefined) {
+    const delayMinutes = parseFloat(campaign.delayMinutes);
+    if (isNaN(delayMinutes) || delayMinutes < 0) {
+      return { success: false, error: 'Delay must be a non-negative number' };
+    }
+    if (delayMinutes > 1440) {
+      return { success: false, error: 'Delay cannot exceed 1440 minutes (24 hours)' };
+    }
+    campaign.delayMinutes = delayMinutes;
+  }
+
   return emailService.sendCampaign(campaign, contacts, settings, (progress) => {
-    mainWindow.webContents.send('email:progress', progress);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('email:progress', progress);
+    }
   });
 });
-ipcMain.handle('email:pause', async () => emailService.pause());
-ipcMain.handle('email:resume', async () => emailService.resume());
-ipcMain.handle('email:stop', async () => emailService.stop());
+safeHandle('email:pause', async () => emailService.pause());
+safeHandle('email:resume', async () => emailService.resume());
+safeHandle('email:stop', async () => emailService.stop());
 
 // ==================== EMAIL VERIFICATION ====================
-ipcMain.handle('verify:email', async (event, email) => verificationService.verifyEmail(email));
-ipcMain.handle('verify:bulk', async (event, emails) => {
-  return verificationService.verifyBulk(emails, (progress) => {
-    mainWindow.webContents.send('verify:progress', progress);
+safeHandle('verify:email', async (event, email) => {
+  if (!email || typeof email !== 'string' || !email.includes('@')) {
+    return { success: false, error: 'Valid email address is required' };
+  }
+  return verificationService.verifyEmail(email);
+});
+
+safeHandle('verify:bulk', async (event, emails) => {
+  if (!Array.isArray(emails) || emails.length === 0) {
+    return { success: false, error: 'Email list is required' };
+  }
+  const results = await verificationService.verifyBulk(emails, (progress) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('verify:progress', progress);
+    }
   });
+
+  // Save verification results back to contacts
+  if (results && Array.isArray(results)) {
+    try {
+      for (const result of results) {
+        if (result.email && result.status) {
+          const allContacts = db.getAllContacts();
+          const contact = allContacts.find(c => c.email.toLowerCase() === result.email.toLowerCase());
+          if (contact) {
+            contact.verified = result.status;
+            db.updateContact(contact);
+          }
+        }
+      }
+    } catch (saveErr) {
+      console.error('Failed to save verification results to contacts:', saveErr);
+    }
+  }
+
+  return results;
+});
+
+// Verification control handlers
+safeHandle('verify:pause', async () => {
+  if (verificationService.pause) return verificationService.pause();
+  return { success: false, error: 'Pause not supported' };
+});
+
+safeHandle('verify:resume', async () => {
+  if (verificationService.resume) return verificationService.resume();
+  return { success: false, error: 'Resume not supported' };
+});
+
+safeHandle('verify:stop', async () => {
+  if (verificationService.stop) return verificationService.stop();
+  return { success: false, error: 'Stop not supported' };
 });
 
 // ==================== SPAM CHECK & AUTO-FIX ====================
-ipcMain.handle('spam:check', async (event, { subject, content }) => spamService.analyzeContent(subject, content));
-ipcMain.handle('spam:autoFix', async (event, { subject, content, issues }) => spamService.autoFix(subject, content, issues));
-ipcMain.handle('spam:getSuggestions', async (event, word) => spamService.getSuggestions(word));
-ipcMain.handle('spam:getReplacements', async () => db.getAllSpamReplacements());
-ipcMain.handle('spam:addReplacement', async (event, item) => db.addSpamReplacement(item));
-ipcMain.handle('spam:updateReplacement', async (event, item) => db.updateSpamReplacement(item));
-ipcMain.handle('spam:deleteReplacement', async (event, id) => db.deleteSpamReplacement(id));
+safeHandle('spam:check', async (event, { subject, content }) => spamService.analyzeContent(subject, content));
+safeHandle('spam:autoFix', async (event, { subject, content, issues }) => spamService.autoFix(subject, content, issues));
+safeHandle('spam:getSuggestions', async (event, word) => spamService.getSuggestions(word));
+safeHandle('spam:getReplacements', async () => db.getAllSpamReplacements());
+safeHandle('spam:addReplacement', async (event, item) => db.addSpamReplacement(item));
+safeHandle('spam:updateReplacement', async (event, item) => db.updateSpamReplacement(item));
+safeHandle('spam:deleteReplacement', async (event, id) => db.deleteSpamReplacement(id));
 
 // ==================== TRACKING ====================
-ipcMain.handle('tracking:addEvent', async (event, trackingEvent) => db.addTrackingEvent(trackingEvent));
-ipcMain.handle('tracking:getEvents', async (event, campaignId) => db.getTrackingEvents(campaignId));
+safeHandle('tracking:addEvent', async (event, trackingEvent) => db.addTrackingEvent(trackingEvent));
+safeHandle('tracking:getEvents', async (event, campaignId) => db.getTrackingEvents(campaignId));
 
 // ==================== APP SETTINGS ====================
-ipcMain.handle('settings:get', async () => db.getSettings());
-ipcMain.handle('settings:save', async (event, settings) => db.saveSettings(settings));
+safeHandle('settings:get', async () => db.getSettings());
+safeHandle('settings:save', async (event, settings) => db.saveSettings(settings));
 
 // ==================== STATISTICS ====================
-ipcMain.handle('stats:getDashboard', async () => db.getDashboardStats());
+safeHandle('stats:getDashboard', async () => db.getDashboardStats());
+
+// ==================== SMTP WARMUP ====================
+safeHandle('warmup:getSchedules', async () => {
+  try {
+    const settings = db.getSettings();
+    return JSON.parse(settings.warmupSchedules || '[]');
+  } catch (e) {
+    return [];
+  }
+});
+
+safeHandle('warmup:create', async (event, schedule) => {
+  if (!schedule || !schedule.smtpAccountId) {
+    return { success: false, error: 'SMTP account ID is required' };
+  }
+  if (!schedule.dailyLimit || schedule.dailyLimit < 1) {
+    return { success: false, error: 'Daily limit must be a positive number' };
+  }
+  try {
+    const settings = db.getSettings();
+    const schedules = JSON.parse(settings.warmupSchedules || '[]');
+    schedule.id = crypto.randomUUID();
+    schedule.createdAt = new Date().toISOString();
+    schedule.currentDay = 0;
+    schedule.status = 'active';
+    schedules.push(schedule);
+    db.saveSettings({ ...settings, warmupSchedules: JSON.stringify(schedules) });
+    return { success: true, schedule };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+safeHandle('warmup:update', async (event, schedule) => {
+  if (!schedule || !schedule.id) {
+    return { success: false, error: 'Schedule ID is required' };
+  }
+  try {
+    const settings = db.getSettings();
+    const schedules = JSON.parse(settings.warmupSchedules || '[]');
+    const idx = schedules.findIndex(s => s.id === schedule.id);
+    if (idx === -1) {
+      return { success: false, error: 'Schedule not found' };
+    }
+    schedules[idx] = { ...schedules[idx], ...schedule, updatedAt: new Date().toISOString() };
+    db.saveSettings({ ...settings, warmupSchedules: JSON.stringify(schedules) });
+    return { success: true, schedule: schedules[idx] };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+safeHandle('warmup:delete', async (event, scheduleId) => {
+  if (!scheduleId) {
+    return { success: false, error: 'Schedule ID is required' };
+  }
+  try {
+    const settings = db.getSettings();
+    const schedules = JSON.parse(settings.warmupSchedules || '[]');
+    const filtered = schedules.filter(s => s.id !== scheduleId);
+    if (filtered.length === schedules.length) {
+      return { success: false, error: 'Schedule not found' };
+    }
+    db.saveSettings({ ...settings, warmupSchedules: JSON.stringify(filtered) });
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
 
 // ==================== EXPORT ====================
-ipcMain.handle('export:contacts', async (event, contacts) => {
+safeHandle('export:contacts', async (event, contacts) => {
   const result = await dialog.showSaveDialog(mainWindow, {
     defaultPath: 'contacts.csv',
     filters: [{ name: 'CSV Files', extensions: ['csv'] }]
@@ -623,17 +962,17 @@ ipcMain.handle('export:contacts', async (event, contacts) => {
 
   if (!result.canceled) {
     const headers = 'email,firstName,lastName,company,listName,status,verified,engagementScore,createdAt\n';
-    const rows = contacts.map(c => 
+    const rows = contacts.map(c =>
       `${c.email},${c.firstName || ''},${c.lastName || ''},${c.company || ''},${c.listName || ''},${c.status},${c.verified},${c.engagementScore || 0},${c.createdAt}`
     ).join('\n');
-    
+
     fs.writeFileSync(result.filePath, headers + rows);
     return { success: true, filePath: result.filePath };
   }
   return { success: false };
 });
 
-ipcMain.handle('export:logs', async (event, logs) => {
+safeHandle('export:logs', async (event, logs) => {
   const result = await dialog.showSaveDialog(mainWindow, {
     defaultPath: 'campaign_logs.csv',
     filters: [{ name: 'CSV Files', extensions: ['csv'] }]
@@ -648,7 +987,7 @@ ipcMain.handle('export:logs', async (event, logs) => {
   return { success: false };
 });
 
-ipcMain.handle('export:blacklist', async (event) => {
+safeHandle('export:blacklist', async (event) => {
   const blacklist = db.getAllBlacklist();
   const result = await dialog.showSaveDialog(mainWindow, {
     defaultPath: 'blacklist.csv',
@@ -664,7 +1003,7 @@ ipcMain.handle('export:blacklist', async (event) => {
   return { success: false };
 });
 
-ipcMain.handle('export:verificationResults', async (event, results) => {
+safeHandle('export:verificationResults', async (event, results) => {
   const result = await dialog.showSaveDialog(mainWindow, {
     defaultPath: 'verification_results.csv',
     filters: [{ name: 'CSV Files', extensions: ['csv'] }]
@@ -680,61 +1019,52 @@ ipcMain.handle('export:verificationResults', async (event, results) => {
 });
 
 // ==================== BACKUP & RESTORE ====================
-ipcMain.handle('backup:create', async () => {
+safeHandle('backup:create', async () => {
   const result = await dialog.showSaveDialog(mainWindow, {
     defaultPath: `bulky_backup_${new Date().toISOString().split('T')[0]}.db`,
     filters: [{ name: 'Database Backup', extensions: ['db'] }]
   });
 
   if (!result.canceled) {
-    try {
-      // Export the database to a file
-      const data = db.db.export();
-      const buffer = Buffer.from(data);
-      fs.writeFileSync(result.filePath, buffer);
-      return { success: true, filePath: result.filePath };
-    } catch (error) {
-      return { success: false, error: error.message };
-    }
+    const data = db.db.export();
+    const buffer = Buffer.from(data);
+    fs.writeFileSync(result.filePath, buffer);
+    return { success: true, filePath: result.filePath };
   }
   return { success: false, canceled: true };
 });
 
-ipcMain.handle('backup:restore', async () => {
+safeHandle('backup:restore', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openFile'],
     filters: [{ name: 'Database Backup', extensions: ['db'] }]
   });
 
   if (!result.canceled && result.filePaths.length > 0) {
-    try {
-      const backupPath = result.filePaths[0];
-      const buffer = fs.readFileSync(backupPath);
-      
-      // Close current database
-      db.close();
-      
-      // Write backup to the actual database path
-      fs.writeFileSync(dbPath, buffer);
-      
-      // Reinitialize database
-      const BulkyDatabase = require('./database/db');
-      db = new BulkyDatabase(dbPath);
-      await db.init();
-      
-      // Reinitialize services with new db
-      emailService = new EmailService(db);
-      spamService = new SpamService(db);
-      
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: error.message };
-    }
+    const backupPath = result.filePaths[0];
+    const buffer = fs.readFileSync(backupPath);
+
+    // Close current database
+    db.close();
+
+    // Write backup to the actual database path
+    fs.writeFileSync(dbPath, buffer);
+
+    // Reinitialize database
+    const BulkyDatabase = require('./database/db');
+    db = new BulkyDatabase(dbPath);
+    await db.init();
+
+    // Reinitialize services with new db
+    emailService = new EmailService(db);
+    spamService = new SpamService(db);
+
+    return { success: true };
   }
   return { success: false, canceled: true };
 });
 
-ipcMain.handle('backup:getInfo', async () => {
+safeHandle('backup:getInfo', async () => {
   try {
     const stats = fs.statSync(dbPath);
     return {
@@ -746,3 +1076,6 @@ ipcMain.handle('backup:getInfo', async () => {
     return { size: 'Unknown', lastModified: 'Unknown', path: dbPath };
   }
 });
+
+// Export unsubscribe token generator for use in email service
+module.exports = { getUnsubscribeTokenForEmail };

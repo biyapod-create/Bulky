@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld('electron', {
   contacts: {
     getAll: () => ipcRenderer.invoke('contacts:getAll'),
     getFiltered: (filter) => ipcRenderer.invoke('contacts:getFiltered', filter),
+    getPage: (params) => ipcRenderer.invoke('contacts:getPage', params),
+    getStats: () => ipcRenderer.invoke('contacts:getStats'),
     add: (contact) => ipcRenderer.invoke('contacts:add', contact),
     addBulk: (contacts) => ipcRenderer.invoke('contacts:addBulk', contacts),
     update: (contact) => ipcRenderer.invoke('contacts:update', contact),
@@ -58,6 +60,9 @@ contextBridge.exposeInMainWorld('electron', {
   templates: {
     getAll: () => ipcRenderer.invoke('templates:getAll'),
     getByCategory: (category) => ipcRenderer.invoke('templates:getByCategory', category),
+    getWithBlocks: (templateId) => ipcRenderer.invoke('templates:getWithBlocks', templateId),
+    saveBlocks: (data) => ipcRenderer.invoke('templates:saveBlocks', data),
+    getCategories: () => ipcRenderer.invoke('templates:getCategories'),
     add: (template) => ipcRenderer.invoke('templates:add', template),
     update: (template) => ipcRenderer.invoke('templates:update', template),
     delete: (id) => ipcRenderer.invoke('templates:delete', id)
@@ -79,7 +84,6 @@ contextBridge.exposeInMainWorld('electron', {
     save: (settings) => ipcRenderer.invoke('smtp:save', settings),
     test: (settings) => ipcRenderer.invoke('smtp:test', settings)
   },
-
 
   // Campaigns
   campaigns: {
@@ -109,6 +113,9 @@ contextBridge.exposeInMainWorld('electron', {
   verify: {
     email: (email) => ipcRenderer.invoke('verify:email', email),
     bulk: (emails) => ipcRenderer.invoke('verify:bulk', emails),
+    pause: () => ipcRenderer.invoke('verify:pause'),
+    resume: () => ipcRenderer.invoke('verify:resume'),
+    stop: () => ipcRenderer.invoke('verify:stop'),
     onProgress: (callback) => {
       ipcRenderer.on('verify:progress', (event, data) => callback(data));
     }
@@ -140,6 +147,14 @@ contextBridge.exposeInMainWorld('electron', {
   // Stats
   stats: {
     getDashboard: () => ipcRenderer.invoke('stats:getDashboard')
+  },
+
+  // SMTP Warmup
+  warmup: {
+    getSchedules: () => ipcRenderer.invoke('warmup:getSchedules'),
+    create: (schedule) => ipcRenderer.invoke('warmup:create', schedule),
+    update: (schedule) => ipcRenderer.invoke('warmup:update', schedule),
+    delete: (scheduleId) => ipcRenderer.invoke('warmup:delete', scheduleId)
   },
 
   // Export
