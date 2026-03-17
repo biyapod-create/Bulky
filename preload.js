@@ -141,7 +141,13 @@ contextBridge.exposeInMainWorld('electron', {
   // Settings
   settings: {
     get: () => ipcRenderer.invoke('settings:get'),
-    save: (settings) => ipcRenderer.invoke('settings:save', settings)
+    save: (settings) => ipcRenderer.invoke('settings:save', settings),
+    getWarmup: () => ipcRenderer.invoke('settings:getWarmup'),
+    saveWarmup: (settings) => ipcRenderer.invoke('settings:saveWarmup', settings),
+    getDeliverability: () => ipcRenderer.invoke('settings:getDeliverability'),
+    saveDeliverability: (settings) => ipcRenderer.invoke('settings:saveDeliverability', settings),
+    exportAll: () => ipcRenderer.invoke('settings:exportAll'),
+    importAll: () => ipcRenderer.invoke('settings:importAll')
   },
 
   // Stats

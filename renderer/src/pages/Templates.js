@@ -69,7 +69,7 @@ function Templates() {
     try {
       if (window.electron) {
         const data = await window.electron.templates.getAll();
-        setTemplates(data || []);
+        setTemplates(Array.isArray(data) ? data : []);
       }
     } catch (error) {
       addToast('Failed to load templates', 'error');

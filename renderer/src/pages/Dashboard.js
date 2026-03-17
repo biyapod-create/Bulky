@@ -37,7 +37,7 @@ function Dashboard() {
     try {
       if (window.electron) {
         const data = await window.electron.stats.getDashboard();
-        setStats(prev => ({ ...prev, ...data }));
+        setStats(prev => ({ ...prev, ...(data && typeof data === 'object' && !data.error ? data : {}) }));
       }
     } catch (error) {
       console.error('Failed to load stats:', error);

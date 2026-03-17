@@ -2,6 +2,7 @@ import React from 'react';
 import { HashRouter as Router, Routes, Route } from 'react-router-dom';
 import TitleBar from './components/TitleBar';
 import Sidebar from './components/Sidebar';
+import ErrorBoundary from './components/ErrorBoundary';
 import Dashboard from './pages/Dashboard';
 import Contacts from './pages/Contacts';
 import Campaigns from './pages/Campaigns';
@@ -26,18 +27,20 @@ function App() {
             <div className="main-layout">
               <Sidebar />
               <main className="main-content">
-                <Routes>
-                  <Route path="/" element={<Dashboard />} />
-                  <Route path="/contacts" element={<Contacts />} />
-                  <Route path="/campaigns" element={<Campaigns />} />
-                  <Route path="/composer" element={<Composer />} />
-                  <Route path="/templates" element={<Templates />} />
-                  <Route path="/verify" element={<Verify />} />
-                  <Route path="/spam-checker" element={<SpamChecker />} />
-                  <Route path="/blacklist" element={<Blacklist />} />
-                  <Route path="/settings" element={<Settings />} />
-                  <Route path="/analytics/:campaignId" element={<Analytics />} />
-                </Routes>
+                <ErrorBoundary>
+                  <Routes>
+                    <Route path="/" element={<Dashboard />} />
+                    <Route path="/contacts" element={<Contacts />} />
+                    <Route path="/campaigns" element={<Campaigns />} />
+                    <Route path="/composer" element={<Composer />} />
+                    <Route path="/templates" element={<Templates />} />
+                    <Route path="/verify" element={<Verify />} />
+                    <Route path="/spam-checker" element={<SpamChecker />} />
+                    <Route path="/blacklist" element={<Blacklist />} />
+                    <Route path="/settings" element={<Settings />} />
+                    <Route path="/analytics/:campaignId" element={<Analytics />} />
+                  </Routes>
+                </ErrorBoundary>
               </main>
             </div>
             <ToastContainer />

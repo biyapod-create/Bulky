@@ -105,9 +105,9 @@ function Composer() {
           window.electron.lists.getAll(),
           window.electron.tags.getAll()
         ]);
-        setTemplates(templatesData || []);
-        setLists(listsData || []);
-        setTags(tagsData || []);
+        setTemplates(Array.isArray(templatesData) ? templatesData : []);
+        setLists(Array.isArray(listsData) ? listsData : []);
+        setTags(Array.isArray(tagsData) ? tagsData : []);
       }
     } catch (error) {
       console.error('Failed to load data:', error);

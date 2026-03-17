@@ -381,6 +381,14 @@ function getUnsubscribeTokenForEmail(email, campaignId) {
   return generateUnsubscribeToken(email, campaignId);
 }
 
+// Global error handlers to prevent silent crashes
+process.on('uncaughtException', (error) => {
+  console.error('UNCAUGHT EXCEPTION:', error);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('UNHANDLED REJECTION:', reason);
+});
+
 app.whenReady().then(async () => {
   await initializeServices();
   createWindow();
@@ -424,12 +432,20 @@ safeHandle('contacts:getRecipientCount', async (event, filter) => db.getRecipien
 safeHandle('contacts:getForCampaign', async (event, filter) => db.getContactsForCampaign(filter));
 
 // Paginated contacts
-safeHandle('contacts:getPage', async (event, { page, pageSize, filter, sortBy, sortOrder }) => {
+safeHandle('contacts:getPage', async (event, params) => {
+  const { page, pageSize, perPage, filter, search, listId, status, verified, tag, sortBy, sortOrder } = params || {};
+  // Build filter from either nested filter object or flat params
+  const effectiveFilter = filter || {};
+  if (search) effectiveFilter.search = search;
+  if (listId) effectiveFilter.listId = listId;
+  if (status) effectiveFilter.status = status;
+  if (verified !== undefined && verified !== '') effectiveFilter.verified = verified;
+  if (tag) effectiveFilter.tag = tag;
   const safePage = Math.max(1, parseInt(page) || 1);
-  const safePageSize = Math.min(500, Math.max(1, parseInt(pageSize) || 50));
+  const safePageSize = Math.min(500, Math.max(1, parseInt(pageSize || perPage) || 50));
   const offset = (safePage - 1) * safePageSize;
 
-  const contacts = db.getContactsByFilter(filter || {});
+  const contacts = db.getContactsByFilter(effectiveFilter);
 
   // Sort if requested
   if (sortBy) {
@@ -448,6 +464,7 @@ safeHandle('contacts:getPage', async (event, { page, pageSize, filter, sortBy, s
   return {
     contacts: paginated,
     total,
+    totalCount: total,
     page: safePage,
     pageSize: safePageSize,
     totalPages: Math.ceil(total / safePageSize)
@@ -758,12 +775,16 @@ safeHandle('campaigns:update', async (event, campaign) => db.updateCampaign(camp
 safeHandle('campaigns:delete', async (event, id) => db.deleteCampaign(id));
 safeHandle('campaigns:getLogs', async (event, campaignId) => db.getCampaignLogs(campaignId));
 safeHandle('campaigns:getAnalytics', async (event, campaignId) => db.getCampaignAnalytics(campaignId));
-safeHandle('campaigns:schedule', async (event, { campaignId, scheduledAt, timezone }) =>
-  db.scheduleCampaign(campaignId, scheduledAt, timezone));
+safeHandle('campaigns:schedule', async (event, data) => {
+  const { campaignId, scheduledAt, timezone } = data || {};
+  if (!campaignId || !scheduledAt) return { success: false, error: 'Campaign ID and scheduled time are required' };
+  return db.scheduleCampaign(campaignId, scheduledAt, timezone);
+});
 safeHandle('campaigns:cancelSchedule', async (event, campaignId) => db.cancelScheduledCampaign(campaignId));
 
 // ==================== EMAIL SENDING ====================
-safeHandle('email:send', async (event, { campaign, contacts, settings }) => {
+safeHandle('email:send', async (event, data) => {
+  const { campaign, contacts, settings } = data || {};
   // Validate campaign data
   if (!campaign) {
     return { success: false, error: 'Campaign data is required' };
@@ -828,14 +849,17 @@ safeHandle('verify:bulk', async (event, emails) => {
   });
 
   // Save verification results back to contacts
-  if (results && Array.isArray(results)) {
+  const resultArray = results?.results || (Array.isArray(results) ? results : []);
+  if (resultArray.length > 0) {
     try {
-      for (const result of results) {
+      const allContacts = db.getAllContacts();
+      for (const result of resultArray) {
         if (result.email && result.status) {
-          const allContacts = db.getAllContacts();
           const contact = allContacts.find(c => c.email.toLowerCase() === result.email.toLowerCase());
           if (contact) {
             contact.verified = result.status;
+            contact.verificationScore = result.score || 0;
+            contact.verificationMethod = result.details?.method || 'bulk';
             db.updateContact(contact);
           }
         }
@@ -865,8 +889,14 @@ safeHandle('verify:stop', async () => {
 });
 
 // ==================== SPAM CHECK & AUTO-FIX ====================
-safeHandle('spam:check', async (event, { subject, content }) => spamService.analyzeContent(subject, content));
-safeHandle('spam:autoFix', async (event, { subject, content, issues }) => spamService.autoFix(subject, content, issues));
+safeHandle('spam:check', async (event, data) => {
+  const { subject, content } = data || {};
+  return spamService.analyzeContent(subject || '', content || '');
+});
+safeHandle('spam:autoFix', async (event, data) => {
+  const { subject, content, issues } = data || {};
+  return spamService.autoFix(subject || '', content || '', issues || []);
+});
 safeHandle('spam:getSuggestions', async (event, word) => spamService.getSuggestions(word));
 safeHandle('spam:getReplacements', async () => db.getAllSpamReplacements());
 safeHandle('spam:addReplacement', async (event, item) => db.addSpamReplacement(item));
@@ -881,8 +911,130 @@ safeHandle('tracking:getEvents', async (event, campaignId) => db.getTrackingEven
 safeHandle('settings:get', async () => db.getSettings());
 safeHandle('settings:save', async (event, settings) => db.saveSettings(settings));
 
+safeHandle('settings:getWarmup', async () => {
+  try {
+    const settings = db.getSettings();
+    return settings.warmup ? JSON.parse(settings.warmup) : {};
+  } catch { return {}; }
+});
+
+safeHandle('settings:saveWarmup', async (event, warmupSettings) => {
+  const settings = db.getSettings();
+  settings.warmup = JSON.stringify(warmupSettings);
+  db.saveSettings(settings);
+  return { success: true };
+});
+
+safeHandle('settings:getDeliverability', async () => {
+  try {
+    const settings = db.getSettings();
+    return settings.deliverability ? JSON.parse(settings.deliverability) : {};
+  } catch { return {}; }
+});
+
+safeHandle('settings:saveDeliverability', async (event, deliverabilitySettings) => {
+  const settings = db.getSettings();
+  settings.deliverability = JSON.stringify(deliverabilitySettings);
+  db.saveSettings(settings);
+  return { success: true };
+});
+
+safeHandle('settings:exportAll', async () => {
+  const { dialog } = require('electron');
+  const fs = require('fs');
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export Settings',
+    defaultPath: 'bulky-settings.json',
+    filters: [{ name: 'JSON', extensions: ['json'] }]
+  });
+  if (result.canceled) return { success: false, canceled: true };
+  const settings = db.getSettings();
+  const smtp = db.getSmtpSettings();
+  const accounts = db.getAllSmtpAccounts();
+  const exportData = { settings, smtp, smtpAccounts: accounts, exportedAt: new Date().toISOString() };
+  fs.writeFileSync(result.filePath, JSON.stringify(exportData, null, 2));
+  return { success: true };
+});
+
+safeHandle('settings:importAll', async () => {
+  const { dialog } = require('electron');
+  const fs = require('fs');
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Import Settings',
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+    properties: ['openFile']
+  });
+  if (result.canceled) return { success: false, canceled: true };
+  try {
+    const data = JSON.parse(fs.readFileSync(result.filePaths[0], 'utf-8'));
+    if (data.settings) db.saveSettings(data.settings);
+    if (data.smtp) db.saveSmtpSettings(data.smtp);
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: 'Invalid settings file: ' + e.message };
+  }
+});
+
 // ==================== STATISTICS ====================
-safeHandle('stats:getDashboard', async () => db.getDashboardStats());
+safeHandle('stats:getDashboard', async () => {
+  const stats = db.getDashboardStats();
+  // Add computed fields the Dashboard expects
+  stats.successRate = stats.deliveryRate || 0;
+  stats.deliverabilityScore = Math.round(
+    Math.min(100, Math.max(0,
+      (parseFloat(stats.deliveryRate) || 0) * 0.4 +
+      (parseFloat(stats.openRate) || 0) * 0.3 +
+      (100 - Math.min(100, (stats.blacklistCount || 0) * 2)) * 0.15 +
+      (100 - Math.min(100, (stats.unsubscribeCount || 0) * 2)) * 0.15
+    ))
+  );
+  // Build sendHistory from campaign logs (last 14 days)
+  try {
+    const history = [];
+    for (let i = 13; i >= 0; i--) {
+      const dayResult = db.db.exec(
+        `SELECT COUNT(*) FROM campaign_logs WHERE status='sent' AND date(sentAt) = date('now', '-${i} days')`
+      );
+      const count = dayResult[0]?.values[0][0] || 0;
+      const d = new Date(); d.setDate(d.getDate() - i);
+      history.push({ date: d.toISOString().split('T')[0], count, label: d.toLocaleDateString('en', { weekday: 'short' }) });
+    }
+    stats.sendHistory = history;
+  } catch { stats.sendHistory = []; }
+  // Build recentActivity from tracking events and campaign logs
+  try {
+    const activityResult = db.db.exec(`
+      SELECT type, email, createdAt FROM tracking_events ORDER BY createdAt DESC LIMIT 20
+    `);
+    const activity = [];
+    if (activityResult.length > 0) {
+      const cols = activityResult[0].columns;
+      for (const row of activityResult[0].values) {
+        const obj = {};
+        cols.forEach((c, i) => { obj[c] = row[i]; });
+        activity.push({
+          type: obj.type === 'open' ? 'open' : obj.type === 'click' ? 'click' : 'send',
+          message: obj.type === 'open' ? 'Email opened' : obj.type === 'click' ? 'Link clicked' : 'Email sent',
+          email: obj.email,
+          time: obj.createdAt ? new Date(obj.createdAt).toLocaleString() : ''
+        });
+      }
+    }
+    stats.recentActivity = activity;
+  } catch { stats.recentActivity = []; }
+  // SMTP accounts with health
+  try {
+    const accounts = db.getAllSmtpAccounts();
+    stats.smtpAccounts = (accounts || []).map(a => ({
+      name: a.name || a.host,
+      host: a.host,
+      health: Math.min(100, Math.max(0, 100 - (a.failedCount || 0) * 5)),
+      sentToday: a.sentToday || 0,
+      dailyLimit: a.dailyLimit || 0
+    }));
+  } catch { stats.smtpAccounts = []; }
+  return stats;
+});
 
 // ==================== SMTP WARMUP ====================
 safeHandle('warmup:getSchedules', async () => {

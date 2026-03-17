@@ -24,7 +24,7 @@ function Verify() {
     try {
       if (window.electron) {
         const data = await window.electron.contacts.getAll();
-        setContacts(data || []);
+        setContacts(Array.isArray(data) ? data : []);
       }
     } catch (error) {
       console.error('Failed to load contacts:', error);

@@ -53,8 +53,8 @@ function Campaigns() {
           window.electron.campaigns.getAll(),
           window.electron.lists.getAll()
         ]);
-        setCampaigns(campaignsData || []);
-        setLists(listsData || []);
+        setCampaigns(Array.isArray(campaignsData) ? campaignsData : []);
+        setLists(Array.isArray(listsData) ? listsData : []);
       }
     } catch (error) {
       addToast('Failed to load campaigns', 'error');
@@ -182,7 +182,7 @@ function Campaigns() {
   const handleViewLogs = async (campaign) => {
     try {
       const logs = await window.electron.campaigns.getLogs(campaign.id);
-      setCampaignLogs(logs || []);
+      setCampaignLogs(Array.isArray(logs) ? logs : []);
       setSelectedCampaign(campaign);
       setLogFilter('all');
       setShowLogsModal(true);

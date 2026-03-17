@@ -41,16 +41,16 @@ function Blacklist() {
           window.electron.blacklist.getAll(),
           window.electron.unsubscribes.getAll()
         ]);
-        setBlacklist(blacklistData || []);
-        setUnsubscribes(unsubData || []);
-        
+        setBlacklist(Array.isArray(blacklistData) ? blacklistData : []);
+        setUnsubscribes(Array.isArray(unsubData) ? unsubData : []);
+
         // Calculate stats
-        const bl = blacklistData || [];
+        const bl = Array.isArray(blacklistData) ? blacklistData : [];
         setStats({
           totalBlacklist: bl.length,
           manualBlocks: bl.filter(b => b.source === 'manual').length,
           autoBounces: bl.filter(b => b.source === 'auto_bounce' || b.source === 'bounce').length,
-          unsubscribes: (unsubData || []).length
+          unsubscribes: (Array.isArray(unsubData) ? unsubData : []).length
         });
       }
     } catch (error) {

@@ -83,7 +83,7 @@ function Contacts() {
     try {
       if (window.electron) {
         const data = await window.electron.lists.getAll();
-        setLists(data || []);
+        setLists(Array.isArray(data) ? data : []);
       }
     } catch (error) { /* silent */ }
   };
@@ -92,7 +92,7 @@ function Contacts() {
     try {
       if (window.electron) {
         const data = await window.electron.tags.getAll();
-        setTags(data || []);
+        setTags(Array.isArray(data) ? data : []);
       }
     } catch (error) { /* silent */ }
   };
@@ -126,19 +126,20 @@ function Contacts() {
       let result;
       if (window.electron.contacts.getPage) {
         result = await window.electron.contacts.getPage(params);
-        setContacts(result.contacts || []);
+        setContacts(Array.isArray(result?.contacts) ? result.contacts : []);
         setPagination(prev => ({
           ...prev,
-          totalPages: result.totalPages || 1,
-          totalCount: result.totalCount || 0
+          totalPages: (result && typeof result.totalPages === 'number') ? result.totalPages : 1,
+          totalCount: (result && typeof result.totalCount === 'number') ? result.totalCount : 0
         }));
       } else {
         const filtered = await window.electron.contacts.getFiltered(params);
-        setContacts(filtered || []);
+        const filteredArr = Array.isArray(filtered) ? filtered : [];
+        setContacts(filteredArr);
         setPagination(prev => ({
           ...prev,
-          totalCount: (filtered || []).length,
-          totalPages: Math.ceil((filtered || []).length / prev.perPage) || 1
+          totalCount: filteredArr.length,
+          totalPages: Math.ceil(filteredArr.length / prev.perPage) || 1
         }));
       }
     } catch (error) {

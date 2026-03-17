@@ -116,9 +116,9 @@ function Settings() {
 
   const loadSmtpAccounts = async () => {
     try {
-      if (window.electron?.smtp?.getAccounts) {
-        const accounts = await window.electron.smtp.getAccounts();
-        setSmtpAccounts(accounts || []);
+      if (window.electron?.smtpAccounts?.getAll) {
+        const accounts = await window.electron.smtpAccounts.getAll();
+        setSmtpAccounts(Array.isArray(accounts) ? accounts : []);
       }
     } catch {
       // Multi-account may not be supported yet
@@ -192,10 +192,10 @@ function Settings() {
     }
     try {
       if (editingAccount) {
-        await window.electron.smtp.updateAccount({ ...accountForm, id: editingAccount.id });
+        await window.electron.smtpAccounts.update({ ...accountForm, id: editingAccount.id });
         addToast('Account updated', 'success');
       } else {
-        await window.electron.smtp.addAccount(accountForm);
+        await window.electron.smtpAccounts.add(accountForm);
         addToast('Account added', 'success');
       }
       setShowAccountModal(false);
@@ -210,7 +210,7 @@ function Settings() {
   const handleDeleteAccount = async (id) => {
     if (!window.confirm('Delete this SMTP account?')) return;
     try {
-      await window.electron.smtp.deleteAccount(id);
+      await window.electron.smtpAccounts.delete(id);
       addToast('Account deleted', 'success');
       loadSmtpAccounts();
     } catch (error) {
