@@ -10,32 +10,103 @@ class EmailService {
     this.currentCampaignId = null;
     this.currentSmtpIndex = 0;
 
+    // Periodic transporter cleanup interval (every 30 minutes)
+    this._cleanupInterval = null;
+    this._startPeriodicCleanup();
+
+    // HMAC secret for unsubscribe link tokens
+    this.hmacSecret = crypto.randomBytes(32).toString('hex');
+
     // SMTP response codes and their meanings
     this.smtpResponseCodes = {
       // Success codes
+      211: { type: 'success', category: 'info', message: 'System status or help reply' },
+      214: { type: 'success', category: 'info', message: 'Help message' },
+      220: { type: 'success', category: 'info', message: 'Service ready' },
+      221: { type: 'success', category: 'info', message: 'Service closing transmission channel' },
+      235: { type: 'success', category: 'auth', message: 'Authentication successful' },
       250: { type: 'success', category: 'sent', message: 'Message accepted' },
       251: { type: 'success', category: 'sent', message: 'User not local, will forward' },
-      
+      252: { type: 'success', category: 'sent', message: 'Cannot verify user, will accept message' },
+
       // Temporary failures (soft bounces - retry)
       421: { type: 'soft_bounce', category: 'temporary', message: 'Service unavailable, try again later' },
+      422: { type: 'soft_bounce', category: 'mailbox_full', message: 'Recipient mailbox full' },
+      431: { type: 'soft_bounce', category: 'temporary', message: 'Receiving server disk full' },
+      432: { type: 'soft_bounce', category: 'temporary', message: 'Recipient exchange server stopped' },
+      441: { type: 'soft_bounce', category: 'temporary', message: 'Recipient server not responding' },
+      442: { type: 'soft_bounce', category: 'temporary', message: 'Connection dropped' },
+      446: { type: 'soft_bounce', category: 'temporary', message: 'Maximum hop count exceeded' },
+      447: { type: 'soft_bounce', category: 'temporary', message: 'Outgoing message timed out' },
+      449: { type: 'soft_bounce', category: 'temporary', message: 'Routing error' },
       450: { type: 'soft_bounce', category: 'temporary', message: 'Mailbox busy or temporarily blocked' },
       451: { type: 'soft_bounce', category: 'temporary', message: 'Local error in processing' },
       452: { type: 'soft_bounce', category: 'temporary', message: 'Insufficient system storage' },
-      
+      471: { type: 'soft_bounce', category: 'temporary', message: 'Local policy error, try later' },
+
       // Permanent failures (hard bounces - don't retry)
+      510: { type: 'hard_bounce', category: 'invalid_address', message: 'Bad email address' },
+      511: { type: 'hard_bounce', category: 'invalid_address', message: 'Bad email address' },
+      512: { type: 'hard_bounce', category: 'dns_error', message: 'Host server not found via DNS' },
+      513: { type: 'hard_bounce', category: 'invalid_address', message: 'Address type is incorrect' },
+      521: { type: 'hard_bounce', category: 'blocked', message: 'Host does not accept mail' },
+      523: { type: 'hard_bounce', category: 'size', message: 'Message too large' },
+      530: { type: 'hard_bounce', category: 'auth', message: 'Authentication required' },
+      541: { type: 'hard_bounce', category: 'rejected', message: 'Recipient rejected message' },
       550: { type: 'hard_bounce', category: 'invalid_recipient', message: 'User not found / Mailbox unavailable' },
       551: { type: 'hard_bounce', category: 'invalid_recipient', message: 'User not local' },
       552: { type: 'soft_bounce', category: 'mailbox_full', message: 'Mailbox storage exceeded' },
       553: { type: 'hard_bounce', category: 'invalid_address', message: 'Mailbox name not allowed' },
       554: { type: 'hard_bounce', category: 'rejected', message: 'Transaction failed / Message rejected' },
-      
+
       // Policy/security rejections
       571: { type: 'hard_bounce', category: 'blocked', message: 'Message refused by policy' },
       572: { type: 'hard_bounce', category: 'blocked', message: 'Spam message rejected' }
     };
+
+    // Default warm-up schedule: day -> max emails per day
+    this.defaultWarmUpSchedule = {
+      1: 20, 2: 30, 3: 50, 4: 75, 5: 100,
+      6: 150, 7: 200, 8: 300, 9: 400, 10: 500,
+      11: 700, 12: 900, 13: 1200, 14: 1500,
+      15: 2000, 16: 2500, 17: 3000, 18: 4000,
+      19: 5000, 20: 6000, 21: 7500, 22: 10000
+    };
+  }
+
+  _startPeriodicCleanup() {
+    // Clear stale transporters every 30 minutes
+    this._cleanupInterval = setInterval(() => {
+      this._cleanupTransporters();
+    }, 30 * 60 * 1000);
+    // Allow the process to exit even if the interval is still running
+    if (this._cleanupInterval && this._cleanupInterval.unref) {
+      this._cleanupInterval.unref();
+    }
+  }
+
+  _cleanupTransporters() {
+    for (const [id, transporter] of this.transporters.entries()) {
+      try {
+        transporter.close();
+      } catch (e) { /* ignore */ }
+    }
+    this.transporters.clear();
+  }
+
+  destroy() {
+    if (this._cleanupInterval) {
+      clearInterval(this._cleanupInterval);
+      this._cleanupInterval = null;
+    }
+    this._cleanupTransporters();
   }
 
   createTransporter(settings) {
+    const rejectUnauthorized = settings.rejectUnauthorized !== undefined
+      ? settings.rejectUnauthorized
+      : true;
+
     return nodemailer.createTransport({
       host: settings.host,
       port: settings.port,
@@ -44,7 +115,7 @@ class EmailService {
         user: settings.username,
         pass: settings.password
       },
-      tls: { rejectUnauthorized: false },
+      tls: { rejectUnauthorized },
       pool: true,
       maxConnections: 5,
       maxMessages: 100
@@ -52,12 +123,17 @@ class EmailService {
   }
 
   async testConnection(settings) {
+    let transporter;
     try {
-      const transporter = this.createTransporter(settings);
+      transporter = this.createTransporter(settings);
       await transporter.verify();
       return { success: true, message: 'Connection successful!' };
     } catch (error) {
       return { success: false, message: error.message };
+    } finally {
+      if (transporter) {
+        try { transporter.close(); } catch (e) { /* ignore */ }
+      }
     }
   }
 
@@ -65,54 +141,91 @@ class EmailService {
     return crypto.randomBytes(16).toString('hex');
   }
 
+  // Generate HMAC token for unsubscribe link security
+  generateUnsubscribeToken(email, campaignId) {
+    const data = `${email}:${campaignId}`;
+    return crypto.createHmac('sha256', this.hmacSecret).update(data).digest('hex');
+  }
+
+  // Verify HMAC token on unsubscribe
+  verifyUnsubscribeToken(email, campaignId, token) {
+    const expected = this.generateUnsubscribeToken(email, campaignId);
+    return crypto.timingSafeEqual(
+      Buffer.from(token, 'hex'),
+      Buffer.from(expected, 'hex')
+    );
+  }
+
   // Parse SMTP error to extract code and determine bounce type
   parseSmtpError(error) {
     const errorString = error.message || error.toString();
-    
+
     // Try to extract SMTP code from error message
     const codeMatch = errorString.match(/\b([245]\d{2})\b/);
     const smtpCode = codeMatch ? parseInt(codeMatch[1], 10) : null;
-    
+
     // Get code info or default
     const codeInfo = smtpCode ? this.smtpResponseCodes[smtpCode] : null;
-    
+
     // Determine failure type based on error content
     let failureType = 'unknown';
     let failureReason = errorString;
-    
+
     if (codeInfo) {
       failureType = codeInfo.type;
       failureReason = codeInfo.message;
     } else {
       // Parse common error patterns
       const errorLower = errorString.toLowerCase();
-      
-      if (errorLower.includes('user unknown') || errorLower.includes('user not found') || 
+
+      if (errorLower.includes('user unknown') || errorLower.includes('user not found') ||
           errorLower.includes('does not exist') || errorLower.includes('no such user') ||
-          errorLower.includes('invalid recipient') || errorLower.includes('recipient rejected')) {
+          errorLower.includes('invalid recipient') || errorLower.includes('recipient rejected') ||
+          errorLower.includes('account disabled') || errorLower.includes('account has been disabled') ||
+          errorLower.includes('no mailbox') || errorLower.includes('unknown user') ||
+          errorLower.includes('address rejected') || errorLower.includes('relay denied')) {
         failureType = 'hard_bounce';
         failureReason = 'Recipient does not exist';
       } else if (errorLower.includes('mailbox full') || errorLower.includes('over quota') ||
-                 errorLower.includes('storage exceeded')) {
+                 errorLower.includes('storage exceeded') || errorLower.includes('quota exceeded') ||
+                 errorLower.includes('insufficient storage') || errorLower.includes('disk full')) {
         failureType = 'soft_bounce';
         failureReason = 'Mailbox full';
       } else if (errorLower.includes('blocked') || errorLower.includes('blacklisted') ||
-                 errorLower.includes('rejected') || errorLower.includes('denied')) {
+                 errorLower.includes('rejected') || errorLower.includes('denied') ||
+                 errorLower.includes('banned') || errorLower.includes('listed at') ||
+                 errorLower.includes('barracuda') || errorLower.includes('spamhaus') ||
+                 errorLower.includes('sorbs') || errorLower.includes('rbl') ||
+                 errorLower.includes('policy violation') || errorLower.includes('access denied')) {
         failureType = 'hard_bounce';
         failureReason = 'Message blocked or rejected';
-      } else if (errorLower.includes('timeout') || errorLower.includes('timed out')) {
+      } else if (errorLower.includes('timeout') || errorLower.includes('timed out') ||
+                 errorLower.includes('time out')) {
         failureType = 'soft_bounce';
         failureReason = 'Connection timeout';
-      } else if (errorLower.includes('connection') || errorLower.includes('socket')) {
+      } else if (errorLower.includes('connection') || errorLower.includes('socket') ||
+                 errorLower.includes('econnrefused') || errorLower.includes('econnreset') ||
+                 errorLower.includes('ehostunreach') || errorLower.includes('enetunreach')) {
         failureType = 'soft_bounce';
         failureReason = 'Connection error';
-      } else if (errorLower.includes('spam') || errorLower.includes('spf') || 
-                 errorLower.includes('dkim') || errorLower.includes('dmarc')) {
+      } else if (errorLower.includes('spam') || errorLower.includes('spf') ||
+                 errorLower.includes('dkim') || errorLower.includes('dmarc') ||
+                 errorLower.includes('phishing') || errorLower.includes('suspicious') ||
+                 errorLower.includes('virus') || errorLower.includes('malware')) {
         failureType = 'hard_bounce';
         failureReason = 'Rejected as spam or authentication failure';
+      } else if (errorLower.includes('rate limit') || errorLower.includes('too many') ||
+                 errorLower.includes('throttl') || errorLower.includes('try again later') ||
+                 errorLower.includes('too fast') || errorLower.includes('slow down')) {
+        failureType = 'soft_bounce';
+        failureReason = 'Rate limited, try again later';
+      } else if (errorLower.includes('auth') || errorLower.includes('credential') ||
+                 errorLower.includes('password') || errorLower.includes('login')) {
+        failureType = 'hard_bounce';
+        failureReason = 'SMTP authentication failure';
       }
     }
-    
+
     return {
       smtpCode,
       smtpResponse: errorString.substring(0, 500), // Limit length
@@ -133,17 +246,17 @@ class EmailService {
   // Advanced personalization with conditionals and fallbacks
   personalizeContent(content, contact, campaign = null) {
     let personalized = content;
-    
+
     // Process spintax FIRST (before other replacements)
     personalized = this.processSpintax(personalized);
-    
+
     // Basic fields
     personalized = personalized.replace(/\{\{email\}\}/gi, contact.email || '');
     personalized = personalized.replace(/\{\{firstName\}\}/gi, contact.firstName || '');
     personalized = personalized.replace(/\{\{lastName\}\}/gi, contact.lastName || '');
-    personalized = personalized.replace(/\{\{fullName\}\}/gi, 
+    personalized = personalized.replace(/\{\{fullName\}\}/gi,
       `${contact.firstName || ''} ${contact.lastName || ''}`.trim() || contact.email.split('@')[0]);
-    
+
     // Extended fields
     personalized = personalized.replace(/\{\{company\}\}/gi, contact.company || '');
     personalized = personalized.replace(/\{\{phone\}\}/gi, contact.phone || '');
@@ -151,11 +264,11 @@ class EmailService {
     personalized = personalized.replace(/\{\{customField2\}\}/gi, contact.customField2 || '');
     personalized = personalized.replace(/\{\{custom1\}\}/gi, contact.customField1 || '');
     personalized = personalized.replace(/\{\{custom2\}\}/gi, contact.customField2 || '');
-    
+
     // Email domain extraction
     const emailDomain = contact.email.split('@')[1] || '';
     personalized = personalized.replace(/\{\{emailDomain\}\}/gi, emailDomain);
-    
+
     // Date/Time placeholders
     const now = new Date();
     personalized = personalized.replace(/\{\{date\}\}/gi, now.toLocaleDateString());
@@ -164,7 +277,7 @@ class EmailService {
     personalized = personalized.replace(/\{\{month\}\}/gi, now.toLocaleString('default', { month: 'long' }));
     personalized = personalized.replace(/\{\{day\}\}/gi, now.getDate().toString());
     personalized = personalized.replace(/\{\{dayOfWeek\}\}/gi, now.toLocaleString('default', { weekday: 'long' }));
-    
+
     // Random number (for unique offers, etc.)
     personalized = personalized.replace(/\{\{randomNumber\}\}/gi, () => Math.floor(Math.random() * 10000).toString());
     personalized = personalized.replace(/\{\{uniqueCode\}\}/gi, () => crypto.randomBytes(4).toString('hex').toUpperCase());
@@ -213,7 +326,8 @@ class EmailService {
 
     // Unsubscribe link placeholder
     if (campaign && campaign.id) {
-      const unsubLink = `{{unsubscribeUrl}}?email=${encodeURIComponent(contact.email)}&cid=${campaign.id}`;
+      const token = this.generateUnsubscribeToken(contact.email, campaign.id);
+      const unsubLink = `{{unsubscribeUrl}}?email=${encodeURIComponent(contact.email)}&cid=${campaign.id}&token=${token}`;
       personalized = personalized.replace(/\{\{unsubscribeLink\}\}/gi, unsubLink);
     }
 
@@ -274,7 +388,8 @@ class EmailService {
   }
 
   addUnsubscribeLink(html, campaignId, contactId, email) {
-    const unsubUrl = `${this.getTrackingBaseUrl()}/unsubscribe/${campaignId}/${contactId || 'unknown'}?email=${encodeURIComponent(email)}`;
+    const token = this.generateUnsubscribeToken(email, campaignId);
+    const unsubUrl = `${this.getTrackingBaseUrl()}/unsubscribe/${campaignId}/${contactId || 'unknown'}?email=${encodeURIComponent(email)}&token=${token}`;
     let processed = html.replace(/\{\{unsubscribeLink\}\}/gi, unsubUrl);
     processed = processed.replace(/\{\{unsubscribeUrl\}\}/gi, unsubUrl);
     return processed;
@@ -284,11 +399,15 @@ class EmailService {
     try {
       const accounts = this.db.getActiveSmtpAccounts();
       if (!accounts || accounts.length === 0) return null;
-      
+
       for (let i = 0; i < accounts.length; i++) {
         const idx = (this.currentSmtpIndex + i) % accounts.length;
         const account = accounts[idx];
-        if (account.sentToday < account.dailyLimit) {
+
+        // Check warm-up limits if warm-up mode is enabled
+        const effectiveLimit = this._getEffectiveDailyLimit(account);
+
+        if (account.sentToday < effectiveLimit) {
           this.currentSmtpIndex = (idx + 1) % accounts.length;
           return account;
         }
@@ -297,6 +416,54 @@ class EmailService {
     } catch (e) {
       return null;
     }
+  }
+
+  // Get effective daily limit considering warm-up mode
+  _getEffectiveDailyLimit(account) {
+    if (!account.warmUpEnabled || !account.warmUpStartDate) {
+      return account.dailyLimit;
+    }
+
+    const startDate = new Date(account.warmUpStartDate);
+    const now = new Date();
+    const daysSinceStart = Math.floor((now - startDate) / (1000 * 60 * 60 * 24)) + 1;
+
+    const schedule = account.warmUpSchedule || this.defaultWarmUpSchedule;
+    const maxScheduleDay = Math.max(...Object.keys(schedule).map(Number));
+
+    if (daysSinceStart >= maxScheduleDay) {
+      // Warm-up complete, use full daily limit
+      return account.dailyLimit;
+    }
+
+    // Find the appropriate warm-up limit for the current day
+    const scheduleDays = Object.keys(schedule).map(Number).sort((a, b) => a - b);
+    let warmUpLimit = schedule[scheduleDays[0]];
+    for (const day of scheduleDays) {
+      if (daysSinceStart >= day) {
+        warmUpLimit = schedule[day];
+      } else {
+        break;
+      }
+    }
+
+    return Math.min(warmUpLimit, account.dailyLimit);
+  }
+
+  // Get warm-up delay multiplier: slower sending in early warm-up days
+  _getWarmUpDelayMultiplier(account) {
+    if (!account.warmUpEnabled || !account.warmUpStartDate) {
+      return 1;
+    }
+
+    const startDate = new Date(account.warmUpStartDate);
+    const now = new Date();
+    const daysSinceStart = Math.floor((now - startDate) / (1000 * 60 * 60 * 24)) + 1;
+
+    if (daysSinceStart <= 3) return 3;
+    if (daysSinceStart <= 7) return 2;
+    if (daysSinceStart <= 14) return 1.5;
+    return 1;
   }
 
   getTransporter(account) {
@@ -315,34 +482,68 @@ class EmailService {
     return baseMs + (Math.random() * variance * 2 - variance);
   }
 
+  // Retry with exponential backoff for soft bounces
+  async _sendWithRetry(transporter, settings, contact, subject, content, campaign, variant, maxRetries = 3) {
+    let lastError = null;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const result = await this.sendSingleEmail(transporter, settings, contact, subject, content, campaign, variant);
+        return result;
+      } catch (error) {
+        lastError = error;
+        const errorInfo = this.parseSmtpError(error);
+
+        // Only retry soft bounces, not hard bounces
+        if (errorInfo.failureType !== 'soft_bounce' || attempt >= maxRetries) {
+          throw error;
+        }
+
+        // Exponential backoff: 5s, 15s, 45s
+        const backoffMs = 5000 * Math.pow(3, attempt);
+        await this.sleep(backoffMs);
+      }
+    }
+
+    throw lastError;
+  }
+
   async sendSingleEmail(transporter, settings, contact, subject, content, campaign = null, variant = 'A') {
     const personalizedSubject = this.personalizeContent(subject, contact, campaign);
     let personalizedContent = this.personalizeContent(content, contact, campaign);
-    
+
     const trackingId = this.generateTrackingId();
     const contactId = contact.id || 'unknown';
-    
+
     if (campaign && campaign.id) {
       // Add tracking with contact ID for accurate attribution
       personalizedContent = this.addOpenTracking(personalizedContent, trackingId, campaign.id, contactId);
       personalizedContent = this.addClickTracking(personalizedContent, trackingId, campaign.id, contactId);
       personalizedContent = this.addUnsubscribeLink(personalizedContent, campaign.id, contactId, contact.email);
     }
-    
+
     const plainTextContent = this.htmlToPlainText(personalizedContent);
     const domain = settings.fromEmail.split('@')[1] || 'localhost';
-    
+
+    const messageId = this.generateMessageId(domain);
+
     const headers = {
-      'X-Mailer': 'Bulky Email Sender v3.2',
-      'Message-ID': this.generateMessageId(domain),
+      'MIME-Version': '1.0',
+      'X-Mailer': 'BulkyMailer/3.5',
+      'Message-ID': messageId,
       'X-Priority': '3',
       'Precedence': 'bulk',
       'X-Campaign-ID': campaign?.id || 'direct',
-      'X-Tracking-ID': trackingId
+      'X-Tracking-ID': trackingId,
+      'Feedback-ID': `${campaign?.id || 'direct'}:${contactId}:bulky`
     };
-    
+
     // Add List-Unsubscribe header for Gmail/email clients
-    const unsubUrl = campaign ? `${this.getTrackingBaseUrl()}/unsubscribe/${campaign.id}/${contactId}?email=${encodeURIComponent(contact.email)}` : null;
+    const unsubToken = campaign ? this.generateUnsubscribeToken(contact.email, campaign.id) : null;
+    const unsubUrl = campaign
+      ? `${this.getTrackingBaseUrl()}/unsubscribe/${campaign.id}/${contactId}?email=${encodeURIComponent(contact.email)}&token=${unsubToken}`
+      : null;
+
     if (unsubUrl) {
       headers['List-Unsubscribe'] = `<${unsubUrl}>`;
       headers['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
@@ -362,9 +563,9 @@ class EmailService {
     };
 
     const result = await transporter.sendMail(mailOptions);
-    return { 
-      ...result, 
-      trackingId, 
+    return {
+      ...result,
+      trackingId,
       variant,
       smtpCode: 250,
       smtpResponse: result.response || 'Message accepted',
@@ -380,7 +581,7 @@ class EmailService {
     // Filter out blacklisted, unsubscribed, and previously bounced contacts
     const validContacts = [];
     const skippedReasons = { blacklisted: 0, unsubscribed: 0, bounced: 0 };
-    
+
     for (const contact of contacts) {
       if (this.db.isBlacklisted(contact.email)) {
         skippedReasons.blacklisted++;
@@ -401,8 +602,15 @@ class EmailService {
     const transporter = this.createTransporter(smtpSettings);
     const batchSize = campaign.batchSize || 50;
     const delayMinutes = campaign.delayMinutes || 10;
-    const delayBetweenEmails = 2000;
+
+    // Configurable delay between emails (default 2000ms)
+    const configuredDelay = campaign.delayBetweenEmails != null
+      ? campaign.delayBetweenEmails
+      : (smtpSettings.delayBetweenEmails != null ? smtpSettings.delayBetweenEmails : 2000);
     const delayBetweenBatches = delayMinutes * 60 * 1000;
+
+    // Retry config
+    const maxRetries = campaign.maxRetries != null ? campaign.maxRetries : 3;
 
     let sentCount = 0;
     let failedCount = 0;
@@ -458,7 +666,7 @@ class EmailService {
         let subject = campaign.subject;
         let content = campaign.content;
         let variant = 'A';
-        
+
         if (campaign.isABTest) {
           if (abTestContacts.B.some(c => c.id === contact.id)) {
             subject = campaign.subjectB || campaign.subject;
@@ -479,7 +687,7 @@ class EmailService {
         try {
           let activeTransporter = transporter;
           let activeSettings = smtpSettings;
-          
+
           const rotatingAccount = await this.getNextSmtpAccount();
           if (rotatingAccount) {
             activeTransporter = this.getTransporter(rotatingAccount);
@@ -487,8 +695,12 @@ class EmailService {
             this.db.incrementSmtpSentCount(rotatingAccount.id);
           }
 
-          const result = await this.sendSingleEmail(activeTransporter, activeSettings, contact, subject, content, campaign, variant);
-          
+          // Use retry logic for sending
+          const result = await this._sendWithRetry(
+            activeTransporter, activeSettings, contact,
+            subject, content, campaign, variant, maxRetries
+          );
+
           sentCount++;
           sendResult = {
             status: 'sent',
@@ -502,18 +714,18 @@ class EmailService {
         } catch (error) {
           // Parse the error to determine bounce type
           const errorInfo = this.parseSmtpError(error);
-          
+
           if (errorInfo.failureType === 'hard_bounce') {
             bouncedCount++;
             sendResult.status = 'bounced';
-            
+
             // Update contact bounce count and add to blacklist after 2 hard bounces
             this.db.incrementContactBounce(contact.id, errorInfo.failureReason);
             if (contact.bounceCount >= 1) {
-              this.db.addToBlacklist({ 
-                email: contact.email, 
-                reason: `Hard bounce: ${errorInfo.failureReason}`, 
-                source: 'auto_bounce' 
+              this.db.addToBlacklist({
+                email: contact.email,
+                reason: `Hard bounce: ${errorInfo.failureReason}`,
+                source: 'auto_bounce'
               });
             }
           } else if (errorInfo.failureType === 'soft_bounce') {
@@ -523,7 +735,7 @@ class EmailService {
             failedCount++;
             sendResult.status = 'failed';
           }
-          
+
           sendResult.smtpCode = errorInfo.smtpCode;
           sendResult.smtpResponse = errorInfo.smtpResponse;
           sendResult.failureType = errorInfo.failureType;
@@ -565,7 +777,14 @@ class EmailService {
         });
 
         if (!this.isStopped) {
-          await this.sleep(this.getRandomDelay(delayBetweenEmails));
+          // Apply warm-up delay multiplier if applicable
+          let activeAccount = smtpSettings;
+          const rotatingAccount = await this.getNextSmtpAccount();
+          if (rotatingAccount) {
+            activeAccount = rotatingAccount;
+          }
+          const warmUpMultiplier = this._getWarmUpDelayMultiplier(activeAccount);
+          await this.sleep(this.getRandomDelay(configuredDelay * warmUpMultiplier));
         }
       }
 
@@ -606,15 +825,17 @@ class EmailService {
     });
 
     this.currentCampaignId = null;
-    this.transporters.clear();
+    // Clean up transporter pool properly
+    try { transporter.close(); } catch (e) { /* ignore */ }
+    this._cleanupTransporters();
 
-    return { 
-      success: true, 
-      status: campaign.status, 
-      sent: sentCount, 
-      failed: failedCount, 
+    return {
+      success: true,
+      status: campaign.status,
+      sent: sentCount,
+      failed: failedCount,
       bounced: bouncedCount,
-      total: totalContacts, 
+      total: totalContacts,
       skipped: skippedCount,
       skippedReasons
     };

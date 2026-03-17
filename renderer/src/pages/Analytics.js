@@ -17,6 +17,7 @@ function Analytics() {
       loadAnalytics();
       loadLogs();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [campaignId]);
 
   const loadAnalytics = async () => {
@@ -72,7 +73,7 @@ function Analytics() {
   const delivered = Math.max(0, sent - bounced);
   
   // Calculate percentages based on REAL metrics
-  const sentPct = total > 0 ? (sent / total * 100).toFixed(1) : '0.0';
+  const sentPct = total > 0 ? (sent / total * 100).toFixed(1) : '0.0'; // eslint-disable-line no-unused-vars
   const deliveredPct = sent > 0 ? (delivered / sent * 100).toFixed(1) : '0.0';
   const failedPct = total > 0 ? (failed / total * 100).toFixed(1) : '0.0';
   const bouncePct = sent > 0 ? (bounced / sent * 100).toFixed(1) : '0.0';
