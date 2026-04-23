@@ -1,14 +1,54 @@
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
+const { version: APP_VERSION } = require('../package.json');
 
 class EmailService {
-  constructor(db) {
+  constructor(db, hmacSecret) {
     this.db = db;
     this.transporters = new Map();
     this.isPaused = false;
     this.isStopped = false;
     this.currentCampaignId = null;
     this.currentSmtpIndex = 0;
+    this.trackingBaseUrl = 'http://127.0.0.1:3847';
+
+    // Circuit breaker for SMTP failures with exponential backoff
+    this.circuitBreaker = {
+      failures: 0,
+      lastFailure: 0,
+      state: 'closed', // closed, open, half-open
+      threshold: 5, // failures before opening
+      timeout: 60000, // 1 minute before trying again
+      baseTimeout: 60000 // base timeout for reset
+    };
+
+    // Periodic transporter cleanup: close pooled connections for accounts that
+    // haven't been used in > 30 minutes to prevent stale connection accumulation.
+    this._cleanupInterval = setInterval(() => {
+      if (this.currentCampaignId) return; // don't prune mid-campaign
+      if (this.transporters.size > 0) {
+        for (const t of this.transporters.values()) {
+          try { t.close(); } catch (e) {}
+        }
+        this.transporters.clear();
+      }
+    }, 30 * 60 * 1000);
+    if (typeof this._cleanupInterval.unref === 'function') {
+      this._cleanupInterval.unref();
+    }
+
+    // HMAC secret shared with main.js tracking server — must be the same value so tokens
+    // embedded in outgoing emails can be validated when users click unsubscribe links.
+    this.hmacSecret = hmacSecret || crypto.randomBytes(32).toString('hex');
+
+    // Sending mode: 'bulk' (List-Unsubscribe header included → Gmail Promotions/Inbox)
+    //               'personal' (no List-Unsubscribe → Gmail Inbox, personal-feel emails)
+    this.sendingMode = 'bulk';
+
+    // Physical company address appended to campaign emails (CAN-SPAM compliance).
+    // Explicitly initialized so the footer conditional in sendSingleEmail never
+    // evaluates `undefined` as truthy.
+    this.companyAddress = '';
 
     // SMTP response codes and their meanings
     this.smtpResponseCodes = {
@@ -36,7 +76,7 @@ class EmailService {
   }
 
   createTransporter(settings) {
-    return nodemailer.createTransport({
+    const transportOptions = {
       host: settings.host,
       port: settings.port,
       secure: settings.secure,
@@ -44,25 +84,57 @@ class EmailService {
         user: settings.username,
         pass: settings.password
       },
-      tls: { rejectUnauthorized: false },
+      tls: { rejectUnauthorized: settings.rejectUnauthorized !== false && settings.rejectUnauthorized !== 0 },
       pool: true,
-      maxConnections: 5,
+      maxConnections: 2,
       maxMessages: 100
-    });
+    };
+
+    // Apply DKIM signing if all required fields are present
+    if (settings.dkimPrivateKey && settings.dkimDomain && settings.dkimSelector) {
+      transportOptions.dkim = {
+        domainName: settings.dkimDomain,
+        keySelector: settings.dkimSelector,
+        privateKey: settings.dkimPrivateKey
+      };
+    }
+
+    return nodemailer.createTransport(transportOptions);
   }
 
   async testConnection(settings) {
+    let transporter = null;
     try {
-      const transporter = this.createTransporter(settings);
+      transporter = this.createTransporter(settings);
       await transporter.verify();
       return { success: true, message: 'Connection successful!' };
     } catch (error) {
       return { success: false, message: error.message };
+    } finally {
+      try { transporter?.close(); } catch (e) {}
     }
   }
 
   generateTrackingId() {
     return crypto.randomBytes(16).toString('hex');
+  }
+
+  setPasswordDecryptor(decryptor) {
+    if (typeof decryptor === 'function') {
+      this.decryptPassword = decryptor;
+    }
+  }
+
+  dispose() {
+    if (this._cleanupInterval) {
+      clearInterval(this._cleanupInterval);
+      this._cleanupInterval = null;
+    }
+
+    for (const transporter of this.transporters.values()) {
+      try { transporter.close(); } catch (e) {}
+    }
+    this.transporters.clear();
   }
 
   // Parse SMTP error to extract code and determine bounce type
@@ -122,9 +194,9 @@ class EmailService {
   }
 
   // Process spintax: {option1|option2|option3} -> randomly picks one
-  processSpintax(text) {
+  processSpintax(text, contact) {
     if (!text) return text;
-    return text.replace(/\{([^{}]+)\}/g, (match, options) => {
+    return text.replace(/(?<!\{)\{([^{}]+)\}(?!\})/g, (match, options) => {
       const choices = options.split('|');
       return choices[Math.floor(Math.random() * choices.length)];
     });
@@ -133,9 +205,9 @@ class EmailService {
   // Advanced personalization with conditionals and fallbacks
   personalizeContent(content, contact, campaign = null) {
     let personalized = content;
-    
+
     // Process spintax FIRST (before other replacements)
-    personalized = this.processSpintax(personalized);
+    personalized = this.processSpintax(personalized, contact);
     
     // Basic fields
     personalized = personalized.replace(/\{\{email\}\}/gi, contact.email || '');
@@ -211,10 +283,13 @@ class EmailService {
       return value.charAt(0).toUpperCase() + value.slice(1).toLowerCase();
     });
 
-    // Unsubscribe link placeholder
+    // Unsubscribe link placeholders — createUnsubscribeUrl returns null when no
+    // external tracking domain is set; replace with '' so the literal token or
+    // 'null' string never appears in the sent email.
     if (campaign && campaign.id) {
-      const unsubLink = `{{unsubscribeUrl}}?email=${encodeURIComponent(contact.email)}&cid=${campaign.id}`;
+      const unsubLink = this.createUnsubscribeUrl(campaign.id, contact.id || 'unknown', contact.email) || '';
       personalized = personalized.replace(/\{\{unsubscribeLink\}\}/gi, unsubLink);
+      personalized = personalized.replace(/\{\{unsubscribeUrl\}\}/gi, unsubLink);
     }
 
     return personalized;
@@ -247,12 +322,68 @@ class EmailService {
 
   // Tracking server base URL
   getTrackingBaseUrl() {
-    return 'http://127.0.0.1:3847';
+    return this.trackingBaseUrl;
+  }
+
+  normalizeTrackingBaseUrl(baseUrl) {
+    if (!baseUrl || typeof baseUrl !== 'string') return null;
+
+    let candidate = baseUrl.trim();
+    if (!candidate) return null;
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)) {
+      candidate = `http://${candidate}`;
+    }
+
+    const parsed = new URL(candidate);
+    const pathname = parsed.pathname && parsed.pathname !== '/'
+      ? parsed.pathname.replace(/\/+$/, '')
+      : '';
+    return `${parsed.protocol}//${parsed.host}${pathname}`;
+  }
+
+  // sendingMode: 'bulk' (default) or 'personal'.
+  // In personal mode List-Unsubscribe is omitted so Gmail routes to Primary inbox.
+  setSendingMode(mode) {
+    this.sendingMode = (mode === 'personal') ? 'personal' : 'bulk';
+  }
+
+  // Physical address appended to every bulk email footer (CAN-SPAM / GDPR).
+  setCompanyAddress(address) {
+    this.companyAddress = typeof address === 'string' ? address.trim() : '';
+  }
+
+  setTrackingBaseUrl(baseUrl) {
+    if (baseUrl && typeof baseUrl === 'string') {
+      try {
+        const normalized = this.normalizeTrackingBaseUrl(baseUrl);
+        if (normalized) {
+          this.trackingBaseUrl = normalized;
+        }
+      } catch (e) {}
+    }
+  }
+
+  createUnsubscribeUrl(campaignId, contactId, email) {
+    // SPAM FIX #1: never embed a loopback/private-IP URL in outbound mail.
+    // When no external tracking domain is set return null so callers
+    // fall back to a mailto: unsubscribe link instead.
+    const baseUrl = this.getTrackingBaseUrl();
+    if (/127\.0\.0\.1|localhost|::1/i.test(baseUrl)) return null;
+
+    const params = new URLSearchParams({ email: email || '' });
+    const token = this.generateUnsubscribeToken(email, campaignId);
+    if (token) params.set('token', token);
+    return `${baseUrl}/unsubscribe/${campaignId}/${contactId || 'unknown'}?${params.toString()}`;
   }
 
   addOpenTracking(html, trackingId, campaignId, contactId) {
-    const trackingUrl = `${this.getTrackingBaseUrl()}/track/open/${campaignId}/${contactId || 'unknown'}/${trackingId}`;
-    const trackingPixel = `<img src="${trackingUrl}" width="1" height="1" style="display:none;width:1px;height:1px;border:0;" alt="" />`;
+    // Never embed a localhost/127.0.0.1 URL in outbound email — same rule as click tracking.
+    // Skip open-tracking pixel when no external domain is configured.
+    const baseUrl = this.getTrackingBaseUrl();
+    if (/127\.0\.0\.1|localhost|::1/i.test(baseUrl)) return html;
+
+    const trackingUrl = `${baseUrl}/track/open/${campaignId}/${contactId || 'unknown'}/${trackingId}`;
+    const trackingPixel = `<img src="${trackingUrl}" width="1" height="1" style="display:none;" alt="" />`;
     if (html.toLowerCase().includes('</body>')) {
       return html.replace(/<\/body>/i, `${trackingPixel}</body>`);
     }
@@ -261,6 +392,13 @@ class EmailService {
 
   addClickTracking(html, trackingId, campaignId, contactId) {
     const baseUrl = this.getTrackingBaseUrl();
+
+    // CRITICAL: never embed a localhost / private-IP URL in outbound emails.
+    // If no external tracking domain is configured the click-tracking is
+    // silently skipped — private IPs in links are an automatic spam trigger.
+    const isLocalTracking = /127\.0\.0\.1|localhost/i.test(baseUrl);
+    if (isLocalTracking) return html;
+
     return html.replace(/<a\s+([^>]*href=")([^"]+)(")/gi, (match, before, url, after) => {
       // Skip certain links
       if (url.startsWith('mailto:') || url.startsWith('tel:') || url.startsWith('#') ||
@@ -273,8 +411,16 @@ class EmailService {
     });
   }
 
-  addUnsubscribeLink(html, campaignId, contactId, email) {
-    const unsubUrl = `${this.getTrackingBaseUrl()}/unsubscribe/${campaignId}/${contactId || 'unknown'}?email=${encodeURIComponent(email)}`;
+  addUnsubscribeLink(html, campaignId, contactId, email, settings = null) {
+    // SPAM FIX #1/#6: when no external tracking domain, fall back to a mailto:
+    // unsubscribe so the plain-text part also gets a valid, non-localhost link.
+    const trackingUrl = this.createUnsubscribeUrl(campaignId, contactId, email);
+    const mailtoFallback = (() => {
+      const addr = settings?.unsubscribeEmail || settings?.fromEmail;
+      return addr ? `mailto:${addr}?subject=Unsubscribe` : null;
+    })();
+    const unsubUrl = trackingUrl || mailtoFallback || '';
+    if (!unsubUrl) return html; // nothing to inject
     let processed = html.replace(/\{\{unsubscribeLink\}\}/gi, unsubUrl);
     processed = processed.replace(/\{\{unsubscribeUrl\}\}/gi, unsubUrl);
     return processed;
@@ -282,20 +428,29 @@ class EmailService {
 
   async getNextSmtpAccount() {
     try {
-      const accounts = this.db.getActiveSmtpAccounts();
-      if (!accounts || accounts.length === 0) return null;
+      const accounts = this.db?.getActiveSmtpAccounts?.();
+      if (!accounts || accounts.length === 0) {
+        return { account: null, exhausted: false };
+      }
       
       for (let i = 0; i < accounts.length; i++) {
         const idx = (this.currentSmtpIndex + i) % accounts.length;
         const account = accounts[idx];
         if (account.sentToday < account.dailyLimit) {
           this.currentSmtpIndex = (idx + 1) % accounts.length;
-          return account;
+          // Decrypt password so SMTP rotation uses correct credentials
+          if (this.decryptPassword && typeof this.decryptPassword === 'function' && account.password) {
+            return {
+              account: { ...account, password: this.decryptPassword(account.password) },
+              exhausted: false
+            };
+          }
+          return { account, exhausted: false };
         }
       }
-      return null;
+      return { account: null, exhausted: true };
     } catch (e) {
-      return null;
+      return { account: null, exhausted: false };
     }
   }
 
@@ -322,33 +477,79 @@ class EmailService {
     const trackingId = this.generateTrackingId();
     const contactId = contact.id || 'unknown';
     
-    if (campaign && campaign.id) {
-      // Add tracking with contact ID for accurate attribution
-      personalizedContent = this.addOpenTracking(personalizedContent, trackingId, campaign.id, contactId);
-      personalizedContent = this.addClickTracking(personalizedContent, trackingId, campaign.id, contactId);
-      personalizedContent = this.addUnsubscribeLink(personalizedContent, campaign.id, contactId, contact.email);
-    }
-    
+    // FIX #6: plain text derived from the pre-tracking personalised content
+    // so HTML and text/plain carry identical tokens (divergence raises spam score).
     const plainTextContent = this.htmlToPlainText(personalizedContent);
-    const domain = settings.fromEmail.split('@')[1] || 'localhost';
-    
+
+    // CAN-SPAM / GDPR physical address footer
+    if (campaign && this.companyAddress) {
+      const footerHtml = `<div style="text-align:center;font-size:11px;color:#9ca3af;margin-top:24px;padding-top:12px;border-top:1px solid #e5e7eb;">${this.companyAddress}</div>`;
+      if (personalizedContent.toLowerCase().includes('</body>')) {
+        personalizedContent = personalizedContent.replace(/<\/body>/i, `${footerHtml}</body>`);
+      } else {
+        personalizedContent += footerHtml;
+      }
+    }
+
+    if (campaign && campaign.id) {
+      // Open-tracking pixel: always embed — a hidden 0×0 image does not raise spam
+      // scores the same way redirect-links do, and it's required for opens to register
+      // against the local tracking server during testing AND via an external domain in prod.
+      personalizedContent = this.addOpenTracking(personalizedContent, trackingId, campaign.id, contactId);
+
+      // Click-tracking redirect links: only when an external domain is configured.
+      // A 127.0.0.1 redirect URL inside an outbound email is an instant spam flag.
+      const isLocalTracking = /127\.0\.0\.1|localhost|::1/i.test(this.getTrackingBaseUrl());
+      if (!isLocalTracking) {
+        personalizedContent = this.addClickTracking(personalizedContent, trackingId, campaign.id, contactId);
+      }
+      // Pass settings so addUnsubscribeLink can use mailto: when no external domain.
+      personalizedContent = this.addUnsubscribeLink(personalizedContent, campaign.id, contactId, contact.email, settings);
+    }
+
+    // FIX #4: use SMTP host as Message-ID domain fallback — '@localhost' in
+    // Message-ID is a textbook spam indicator recognised by every major filter.
+    const domain = (settings.fromEmail && settings.fromEmail.includes('@'))
+      ? settings.fromEmail.split('@')[1]
+      : (settings.host ? settings.host.split(':')[0] : 'mail.invalid');
+
+    const isLocalTracking = /127\.0\.0\.1|localhost|::1/i.test(this.getTrackingBaseUrl());
+
+    // Minimal, clean header set.
+    // — X-Priority / Importance removed: they flag bulk mail in SpamAssassin.
+    // — X-Mailer / Precedence removed: fingerprint bulk senders.
+    // — MIME-Version: nodemailer adds this automatically; duplicate causes warnings.
     const headers = {
-      'X-Mailer': 'Bulky Email Sender v3.2',
       'Message-ID': this.generateMessageId(domain),
-      'X-Priority': '3',
-      'Precedence': 'bulk',
-      'X-Campaign-ID': campaign?.id || 'direct',
-      'X-Tracking-ID': trackingId
     };
-    
-    // Add List-Unsubscribe header for Gmail/email clients
-    const unsubUrl = campaign ? `${this.getTrackingBaseUrl()}/unsubscribe/${campaign.id}/${contactId}?email=${encodeURIComponent(contact.email)}` : null;
-    if (unsubUrl) {
-      headers['List-Unsubscribe'] = `<${unsubUrl}>`;
-      headers['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
-    } else if (settings.unsubscribeEmail) {
-      headers['List-Unsubscribe'] = `<mailto:${settings.unsubscribeEmail}?subject=Unsubscribe>`;
-      headers['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
+
+    // Sender: header — removes Gmail 'sent via relay.com' banner when
+    // the SMTP auth address differs from the From: address.
+    const _authDomain = settings.username ? (settings.username.split('@')[1] || '') : '';
+    const _fromDomainH = settings.fromEmail ? (settings.fromEmail.split('@')[1] || '') : '';
+    if (_authDomain && _fromDomainH && _authDomain.toLowerCase() !== _fromDomainH.toLowerCase()) {
+      headers['Sender'] = settings.username;
+    }
+
+    // List-Unsubscribe:
+    //   • NEVER include a localhost/127.0.0.1 URL — private-IP in header = instant spam flag.
+    //   • Always prefer a real external tracking URL when available.
+    //   • Fall back to mailto: so the header is valid and Gmail shows the one-click button.
+    //   • In 'personal' sending mode, omit entirely so Gmail routes to Inbox, not Promotions.
+    const sendingMode = this.sendingMode || 'bulk';
+    if (sendingMode !== 'personal') {
+      const externalUnsubUrl = (!isLocalTracking && campaign)
+        ? this.createUnsubscribeUrl(campaign.id, contactId, contact.email)
+        : null;
+      const mailtoUnsub = (() => {
+        const addr = settings.unsubscribeEmail || settings.replyTo || settings.fromEmail;
+        return addr ? `mailto:${addr}?subject=Unsubscribe` : null;
+      })();
+      const listUnsubValue = externalUnsubUrl || mailtoUnsub;
+      if (listUnsubValue) {
+        headers['List-Unsubscribe'] = `<${listUnsubValue}>`;
+        headers['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
+      }
     }
 
     const mailOptions = {
@@ -356,9 +557,13 @@ class EmailService {
       to: contact.email,
       replyTo: settings.replyTo || settings.fromEmail,
       subject: personalizedSubject,
-      text: plainTextContent,
+      // Both text and HTML are required — missing text/plain is a strong spam signal.
+      text: plainTextContent || this.htmlToPlainText(personalizedContent),
       html: personalizedContent,
-      headers: headers
+      headers: headers,
+      // NOTE: 'envelope' removed — explicit envelope overrides cause SMTP rejection
+      // on many providers (SendGrid, AWS SES, Mailgun) when the envelope sender
+      // doesn't match the authenticated username.
     };
 
     const result = await transporter.sendMail(mailOptions);
@@ -398,10 +603,37 @@ class EmailService {
       validContacts.push(contact);
     }
 
+    // FIX #3: SPF alignment warning
+    if (smtpSettings.fromEmail && smtpSettings.host) {
+      const fromDomain = (smtpSettings.fromEmail.split('@')[1] || '').toLowerCase().trim();
+      const smtpHost   = smtpSettings.host.toLowerCase().trim().replace(/:\d+$/, '');
+      const apexOf = (h) => h.split('.').slice(-2).join('.');
+      if (fromDomain && smtpHost && apexOf(fromDomain) !== apexOf(smtpHost)) {
+        console.warn(
+          `[SPF Alignment] fromEmail domain "${fromDomain}" differs from SMTP host "${smtpHost}". ` +
+          'SPF alignment may fail â use a fromEmail on the same domain as your SMTP server.'
+        );
+      }
+    }
+
+    // FIX #8: Warmup enforcement â ramp send volume for new accounts.
+    if (smtpSettings.warmUpEnabled && smtpSettings.warmUpStartDate) {
+      const startMs   = Date.parse(smtpSettings.warmUpStartDate);
+      const daysSince = isNaN(startMs) ? 0 : Math.floor((Date.now() - startMs) / 86400000);
+      const configuredMax = smtpSettings.dailyLimit || 500;
+      const rampSteps = [50, 100, 200, 400]; // doubles each 7 days
+      const stepIndex = Math.min(Math.floor(daysSince / 7), rampSteps.length - 1);
+      const warmupLimit = daysSince >= rampSteps.length * 7
+        ? configuredMax
+        : Math.min(rampSteps[stepIndex], configuredMax);
+      console.info(`[Warmup] "${smtpSettings.fromEmail}" day ${daysSince}, effective limit: ${warmupLimit}`);
+      if (validContacts.length > warmupLimit) validContacts.splice(warmupLimit);
+    }
+
     const transporter = this.createTransporter(smtpSettings);
     const batchSize = campaign.batchSize || 50;
     const delayMinutes = campaign.delayMinutes || 10;
-    const delayBetweenEmails = 2000;
+    const delayBetweenEmails = campaign.delayBetweenEmails || 2000;
     const delayBetweenBatches = delayMinutes * 60 * 1000;
 
     let sentCount = 0;
@@ -410,7 +642,7 @@ class EmailService {
     const totalContacts = validContacts.length;
     const skippedCount = contacts.length - validContacts.length;
 
-    // A/B Testing setup
+    try {
     let abTestContacts = { A: [], B: [] };
     if (campaign.isABTest && campaign.subjectB) {
       const testSize = Math.ceil(totalContacts * (campaign.abTestPercent || 10) / 100);
@@ -477,18 +709,32 @@ class EmailService {
         };
 
         try {
+          // Circuit breaker check — throws if SMTP is in a prolonged failure state
+          this._circuitCheck();
+
           let activeTransporter = transporter;
           let activeSettings = smtpSettings;
           
-          const rotatingAccount = await this.getNextSmtpAccount();
-          if (rotatingAccount) {
-            activeTransporter = this.getTransporter(rotatingAccount);
-            activeSettings = rotatingAccount;
-            this.db.incrementSmtpSentCount(rotatingAccount.id);
+          const rotation = await this.getNextSmtpAccount();
+          if (rotation.account) {
+            activeTransporter = this.getTransporter(rotation.account);
+            activeSettings = rotation.account;
+            this.db.incrementSmtpSentCount(rotation.account.id);
+          } else if (rotation.exhausted) {
+            const rateLimitError = new Error('All active SMTP accounts have reached their daily limits');
+            rateLimitError.code = 'SMTP_DAILY_LIMIT_REACHED';
+            throw rateLimitError;
+          } else {
+            // Rotation unavailable in legacy single-account mode; use the provided settings
+            const primaryId = smtpSettings?.id;
+            if (primaryId) this.db.incrementSmtpSentCount(primaryId);
           }
 
           const result = await this.sendSingleEmail(activeTransporter, activeSettings, contact, subject, content, campaign, variant);
           
+          // Success — close the circuit if it was probing
+          this._circuitSuccess();
+
           sentCount++;
           sendResult = {
             status: 'sent',
@@ -500,34 +746,52 @@ class EmailService {
           };
 
         } catch (error) {
-          // Parse the error to determine bounce type
-          const errorInfo = this.parseSmtpError(error);
-          
-          if (errorInfo.failureType === 'hard_bounce') {
-            bouncedCount++;
-            sendResult.status = 'bounced';
-            
-            // Update contact bounce count and add to blacklist after 2 hard bounces
-            this.db.incrementContactBounce(contact.id, errorInfo.failureReason);
-            if (contact.bounceCount >= 1) {
-              this.db.addToBlacklist({ 
-                email: contact.email, 
-                reason: `Hard bounce: ${errorInfo.failureReason}`, 
-                source: 'auto_bounce' 
-              });
-            }
-          } else if (errorInfo.failureType === 'soft_bounce') {
+          // Circuit breaker open — skip this contact without counting as an SMTP bounce
+          if (error.code === 'SMTP_DAILY_LIMIT_REACHED') {
             failedCount++;
-            sendResult.status = 'soft_bounce';
-          } else {
+            this.isStopped = true;
+            sendResult.status = 'failed';
+            sendResult.failureType = 'rate_limited';
+            sendResult.failureReason = error.message;
+            sendResult.smtpResponse = error.message;
+          } else if (error.message && error.message.startsWith('Circuit breaker open')) {
             failedCount++;
             sendResult.status = 'failed';
+            sendResult.failureType = 'circuit_open';
+            sendResult.failureReason = error.message;
+          } else {
+            // Record the SMTP failure in the circuit breaker
+            this._circuitFailure();
+
+            // Parse the error to determine bounce type
+            const errorInfo = this.parseSmtpError(error);
+
+            if (errorInfo.failureType === 'hard_bounce') {
+              bouncedCount++;
+              sendResult.status = 'bounced';
+              
+              // Update contact bounce count and add to blacklist after 2 hard bounces
+              this.db.incrementContactBounce(contact.id, errorInfo.failureReason);
+              if (contact.bounceCount >= 1) {
+                this.db.addToBlacklist({ 
+                  email: contact.email, 
+                  reason: `Hard bounce: ${errorInfo.failureReason}`, 
+                  source: 'auto_bounce' 
+                });
+              }
+            } else if (errorInfo.failureType === 'soft_bounce') {
+              failedCount++;
+              sendResult.status = 'soft_bounce';
+            } else {
+              failedCount++;
+              sendResult.status = 'failed';
+            }
+
+            sendResult.smtpCode = errorInfo.smtpCode;
+            sendResult.smtpResponse = errorInfo.smtpResponse;
+            sendResult.failureType = errorInfo.failureType;
+            sendResult.failureReason = errorInfo.failureReason;
           }
-          
-          sendResult.smtpCode = errorInfo.smtpCode;
-          sendResult.smtpResponse = errorInfo.smtpResponse;
-          sendResult.failureType = errorInfo.failureType;
-          sendResult.failureReason = errorInfo.failureReason;
         }
 
         // Log the result with full details
@@ -606,7 +870,6 @@ class EmailService {
     });
 
     this.currentCampaignId = null;
-    this.transporters.clear();
 
     return { 
       success: true, 
@@ -618,11 +881,120 @@ class EmailService {
       skipped: skippedCount,
       skippedReasons
     };
+    } finally {
+      try { transporter.close(); } catch (e) {}
+
+      // Always close transporter pool, even if an unexpected exception was thrown
+      this.currentCampaignId = null;
+      for (const t of this.transporters.values()) {
+        try { t.close(); } catch (e) {}
+      }
+      this.transporters.clear();
+    }
   }
 
   pause() { this.isPaused = true; return { success: true }; }
   resume() { this.isPaused = false; return { success: true }; }
   stop() { this.isStopped = true; this.isPaused = false; return { success: true }; }
+
+  // ============================================================
+  // Circuit Breaker — protects against cascading SMTP failures
+  // States: closed (normal) → open (failing) → half-open (probe)
+  // ============================================================
+
+  _circuitCheck() {
+    const cb = this.circuitBreaker;
+    if (cb.state === 'closed') return; // fast path
+
+    if (cb.state === 'open') {
+      const elapsed = Date.now() - cb.lastFailure;
+      if (elapsed >= cb.timeout) {
+        cb.state = 'half-open'; // allow one probe
+      } else {
+        const remainSecs = Math.ceil((cb.timeout - elapsed) / 1000);
+        throw new Error(`Circuit breaker open — SMTP failures exceeded threshold. Retry in ${remainSecs}s`);
+      }
+    }
+    // half-open: fall through and allow the send attempt
+  }
+
+  _circuitSuccess() {
+    const cb = this.circuitBreaker;
+    if (cb.state !== 'closed') {
+      cb.state = 'closed';
+      cb.failures = 0;
+      cb.lastFailure = 0;
+      cb.timeout = cb.baseTimeout; // reset backoff
+    }
+  }
+
+  _circuitFailure() {
+    const cb = this.circuitBreaker;
+    cb.failures++;
+    cb.lastFailure = Date.now();
+    if (cb.state === 'half-open' || cb.failures >= cb.threshold) {
+      cb.state = 'open';
+      // Exponential backoff capped at 10 minutes
+      const trips = Math.floor(cb.failures / cb.threshold);
+      cb.timeout = Math.min(cb.baseTimeout * Math.pow(2, trips - 1), 10 * 60 * 1000);
+    }
+  }
+
+  getCircuitBreakerState() {
+    return { ...this.circuitBreaker };
+  }
+
+  // Generate HMAC token for unsubscribe link security
+  generateUnsubscribeToken(email, campaignId) {
+    const data = `${email}:${campaignId}`;
+    return crypto.createHmac('sha256', this.hmacSecret).update(data).digest('hex');
+  }
+
+  // Verify HMAC token on unsubscribe
+  verifyUnsubscribeToken(email, campaignId, token) {
+    try {
+      if (!token) return false;
+      const expected = this.generateUnsubscribeToken(email, campaignId);
+      if (expected.length !== token.length) return false;
+      return crypto.timingSafeEqual(
+        Buffer.from(token, 'hex'),
+        Buffer.from(expected, 'hex')
+      );
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // Validate email address format
+  validateEmail(email) {
+    if (!email) return false;
+    // RFC 5322 compliant regex for email validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+    return emailRegex.test(email.trim());
+  }
+
+  // Validate contact object
+  validateContact(contact) {
+    if (!contact || typeof contact !== 'object') {
+      return { valid: false, error: 'Invalid contact data' };
+    }
+    if (!contact.email || typeof contact.email !== 'string' || !this.validateEmail(contact.email)) {
+      return { valid: false, error: 'Invalid email address' };
+    }
+    if (contact.firstName && (typeof contact.firstName !== 'string' || contact.firstName.length > 100)) {
+      return { valid: false, error: 'Invalid first name' };
+    }
+    if (contact.lastName && (typeof contact.lastName !== 'string' || contact.lastName.length > 100)) {
+      return { valid: false, error: 'Invalid last name' };
+    }
+    if (contact.company && (typeof contact.company !== 'string' || contact.company.length > 100)) {
+      return { valid: false, error: 'Invalid company' };
+    }
+    if (contact.phone && (typeof contact.phone !== 'string' || contact.phone.length > 20)) {
+      return { valid: false, error: 'Invalid phone' };
+    }
+    return { valid: true };
+  }
 }
 
 module.exports = EmailService;

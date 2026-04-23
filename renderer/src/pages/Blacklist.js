@@ -3,7 +3,7 @@ import { Shield, Plus, Upload, Download, Trash2, Search, XCircle, Ban, UserX, Ma
 import Modal from '../components/Modal';
 import { useToast } from '../components/ToastContext';
 
-function Blacklist() {
+function Blacklist({ isActive }) {
   const { addToast } = useToast();
   const [blacklist, setBlacklist] = useState([]);
   const [unsubscribes, setUnsubscribes] = useState([]);
@@ -31,6 +31,31 @@ function Blacklist() {
 
   useEffect(() => {
     loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Refresh when becoming the active tab
+  useEffect(() => {
+    if (isActive) loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isActive]);
+
+  // React to background blacklist/unsubscribe mutations
+  useEffect(() => {
+    if (!window.electron?.onDataChanged) return;
+    const unsub = window.electron.onDataChanged((data) => {
+      if (data.type === 'blacklist') loadData();
+    });
+    return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Real-time unsubscribe events from the tracking server
+  useEffect(() => {
+    if (!window.electron?.onTrackingUnsubscribe) return;
+    const unsub = window.electron.onTrackingUnsubscribe(() => loadData());
+    return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const loadData = async () => {
@@ -40,16 +65,16 @@ function Blacklist() {
           window.electron.blacklist.getAll(),
           window.electron.unsubscribes.getAll()
         ]);
-        setBlacklist(blacklistData || []);
-        setUnsubscribes(unsubData || []);
-        
+        setBlacklist(Array.isArray(blacklistData) ? blacklistData : []);
+        setUnsubscribes(Array.isArray(unsubData) ? unsubData : []);
+
         // Calculate stats
-        const bl = blacklistData || [];
+        const bl = Array.isArray(blacklistData) ? blacklistData : [];
         setStats({
           totalBlacklist: bl.length,
           manualBlocks: bl.filter(b => b.source === 'manual').length,
           autoBounces: bl.filter(b => b.source === 'auto_bounce' || b.source === 'bounce').length,
-          unsubscribes: (unsubData || []).length
+          unsubscribes: (Array.isArray(unsubData) ? unsubData : []).length
         });
       }
     } catch (error) {
@@ -70,7 +95,7 @@ function Blacklist() {
         : { domain: formData.value.trim().toLowerCase(), reason: formData.reason, source: 'manual' };
       
       const result = await window.electron.blacklist.add(entry);
-      if (result.success) {
+      if (result && (typeof result === 'string' || result.success !== false)) {
         addToast('Added to blacklist', 'success');
         setShowModal(false);
         setFormData({ type: 'email', value: '', reason: '' });

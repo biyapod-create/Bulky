@@ -1,15 +1,20 @@
-const { contextBridge, ipcRenderer } = require('electron');
+﻿const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electron', {
   // Window Controls
   minimize: () => ipcRenderer.invoke('window:minimize'),
   maximize: () => ipcRenderer.invoke('window:maximize'),
   close: () => ipcRenderer.invoke('window:close'),
+  hide: () => ipcRenderer.invoke('window:hide'),
+  show: () => ipcRenderer.invoke('window:show'),
+  quit: () => ipcRenderer.invoke('window:quit'),
 
   // Contacts
   contacts: {
     getAll: () => ipcRenderer.invoke('contacts:getAll'),
     getFiltered: (filter) => ipcRenderer.invoke('contacts:getFiltered', filter),
+    getPage: (params) => ipcRenderer.invoke('contacts:getPage', params),
+    getStats: () => ipcRenderer.invoke('contacts:getStats'),
     add: (contact) => ipcRenderer.invoke('contacts:add', contact),
     addBulk: (contacts) => ipcRenderer.invoke('contacts:addBulk', contacts),
     update: (contact) => ipcRenderer.invoke('contacts:update', contact),
@@ -17,7 +22,11 @@ contextBridge.exposeInMainWorld('electron', {
     deleteByVerification: (status) => ipcRenderer.invoke('contacts:deleteByVerification', status),
     getRecipientCount: (filter) => ipcRenderer.invoke('contacts:getRecipientCount', filter),
     getForCampaign: (filter) => ipcRenderer.invoke('contacts:getForCampaign', filter),
-    import: () => ipcRenderer.invoke('contacts:import')
+    import: () => ipcRenderer.invoke('contacts:import'),
+    importRaw: () => ipcRenderer.invoke('contacts:importRaw'),
+    importFromPath: (filePath) => ipcRenderer.invoke('contacts:importFromPath', filePath),
+    addTagBulk: (ids, tagId) => ipcRenderer.invoke('contacts:addTagBulk', ids, tagId),
+    getRecipientBreakdown: (filter) => ipcRenderer.invoke('contacts:getRecipientBreakdown', filter)
   },
 
   // Tags
@@ -43,7 +52,8 @@ contextBridge.exposeInMainWorld('electron', {
     addBulk: (entries) => ipcRenderer.invoke('blacklist:addBulk', entries),
     remove: (id) => ipcRenderer.invoke('blacklist:remove', id),
     check: (email) => ipcRenderer.invoke('blacklist:check', email),
-    import: () => ipcRenderer.invoke('blacklist:import')
+    import: () => ipcRenderer.invoke('blacklist:import'),
+    autoBlacklist: () => ipcRenderer.invoke('bounces:autoBlacklist')
   },
 
   // Unsubscribes
@@ -58,9 +68,14 @@ contextBridge.exposeInMainWorld('electron', {
   templates: {
     getAll: () => ipcRenderer.invoke('templates:getAll'),
     getByCategory: (category) => ipcRenderer.invoke('templates:getByCategory', category),
+    getWithBlocks: (templateId) => ipcRenderer.invoke('templates:getWithBlocks', templateId),
+    saveBlocks: (data) => ipcRenderer.invoke('templates:saveBlocks', data),
+    getCategories: () => ipcRenderer.invoke('templates:getCategories'),
     add: (template) => ipcRenderer.invoke('templates:add', template),
     update: (template) => ipcRenderer.invoke('templates:update', template),
-    delete: (id) => ipcRenderer.invoke('templates:delete', id)
+    delete: (id) => ipcRenderer.invoke('templates:delete', id),
+    importFile: () => ipcRenderer.invoke('templates:importFile'),
+    exportTemplate: (template, filename) => ipcRenderer.invoke('templates:exportTemplate', { template, filename })
   },
 
   // SMTP Accounts (Multiple)
@@ -80,7 +95,6 @@ contextBridge.exposeInMainWorld('electron', {
     test: (settings) => ipcRenderer.invoke('smtp:test', settings)
   },
 
-
   // Campaigns
   campaigns: {
     getAll: () => ipcRenderer.invoke('campaigns:getAll'),
@@ -97,21 +111,33 @@ contextBridge.exposeInMainWorld('electron', {
   // Email
   email: {
     send: (data) => ipcRenderer.invoke('email:send', data),
+    testSend: (data) => ipcRenderer.invoke('email:testSend', data),
     pause: () => ipcRenderer.invoke('email:pause'),
     resume: () => ipcRenderer.invoke('email:resume'),
     stop: () => ipcRenderer.invoke('email:stop'),
     onProgress: (callback) => {
-      ipcRenderer.on('email:progress', (event, data) => callback(data));
-    }
+      ipcRenderer.removeAllListeners('email:progress'); // prevent stacking
+      const handler = (event, data) => callback(data);
+      ipcRenderer.on('email:progress', handler);
+      return () => ipcRenderer.removeListener('email:progress', handler);
+    },
+    removeProgressListener: () => ipcRenderer.removeAllListeners('email:progress')
   },
 
   // Verification
   verify: {
-    email: (email) => ipcRenderer.invoke('verify:email', email),
-    bulk: (emails) => ipcRenderer.invoke('verify:bulk', emails),
+    email: (email, options = {}) => ipcRenderer.invoke('verify:email', { email, smtpCheck: options.smtpCheck === true }),
+    bulk: (emails, options = {}) => ipcRenderer.invoke('verify:bulk', { emails, smtpCheck: options.smtpCheck === true }),
+    pause: () => ipcRenderer.invoke('verify:pause'),
+    resume: () => ipcRenderer.invoke('verify:resume'),
+    stop: () => ipcRenderer.invoke('verify:stop'),
     onProgress: (callback) => {
-      ipcRenderer.on('verify:progress', (event, data) => callback(data));
-    }
+      ipcRenderer.removeAllListeners('verify:progress'); // prevent stacking
+      const handler = (event, data) => callback(data);
+      ipcRenderer.on('verify:progress', handler);
+      return () => ipcRenderer.removeListener('verify:progress', handler);
+    },
+    removeProgressListener: () => ipcRenderer.removeAllListeners('verify:progress')
   },
 
   // Spam Check & Auto-Fix
@@ -134,7 +160,26 @@ contextBridge.exposeInMainWorld('electron', {
   // Settings
   settings: {
     get: () => ipcRenderer.invoke('settings:get'),
-    save: (settings) => ipcRenderer.invoke('settings:save', settings)
+    save: (settings) => ipcRenderer.invoke('settings:save', settings),
+    getWarmup: () => ipcRenderer.invoke('settings:getWarmup'),
+    saveWarmup: (settings) => ipcRenderer.invoke('settings:saveWarmup', settings),
+    getDeliverability: () => ipcRenderer.invoke('settings:getDeliverability'),
+    saveDeliverability: (settings) => ipcRenderer.invoke('settings:saveDeliverability', settings),
+    checkDomain: (domain) => ipcRenderer.invoke('settings:checkDomain', domain),
+    exportAll: () => ipcRenderer.invoke('settings:exportAll'),
+    importAll: () => ipcRenderer.invoke('settings:importAll')
+  },
+
+  // AI
+  ai: {
+    getSettings: () => ipcRenderer.invoke('ai:getSettings'),
+    saveSettings: (settings) => ipcRenderer.invoke('ai:saveSettings', settings),
+    improveSubject: (data) => ipcRenderer.invoke('ai:improveSubject', data),
+    analyzeContent: (data) => ipcRenderer.invoke('ai:analyzeContent', data),
+    generateContent: (data) => ipcRenderer.invoke('ai:generateContent', data),
+    generateTemplateBlocks: (data) => ipcRenderer.invoke('ai:generateTemplateBlocks', data),
+    getModels: () => ipcRenderer.invoke('ai:getModels'),
+    localAnalysis: (data) => ipcRenderer.invoke('ai:localAnalysis', data)
   },
 
   // Stats
@@ -142,18 +187,95 @@ contextBridge.exposeInMainWorld('electron', {
     getDashboard: () => ipcRenderer.invoke('stats:getDashboard')
   },
 
+  // SMTP Warmup
+  warmup: {
+    getSchedules: () => ipcRenderer.invoke('warmup:getSchedules'),
+    create: (schedule) => ipcRenderer.invoke('warmup:create', schedule),
+    update: (schedule) => ipcRenderer.invoke('warmup:update', schedule),
+    delete: (scheduleId) => ipcRenderer.invoke('warmup:delete', scheduleId),
+    autoGenerate: (config) => ipcRenderer.invoke('warmup:autoGenerate', config)
+  },
+
   // Export
   export: {
     contacts: (contacts) => ipcRenderer.invoke('export:contacts', contacts),
     logs: (logs) => ipcRenderer.invoke('export:logs', logs),
     blacklist: () => ipcRenderer.invoke('export:blacklist'),
-    verificationResults: (results) => ipcRenderer.invoke('export:verificationResults', results)
+    verificationResults: (results) => ipcRenderer.invoke('export:verificationResults', results),
+    templateFile: (data, filename) => ipcRenderer.invoke('export:templateFile', { data, filename })
   },
 
   // Backup & Restore
   backup: {
     create: () => ipcRenderer.invoke('backup:create'),
     restore: () => ipcRenderer.invoke('backup:restore'),
-    getInfo: () => ipcRenderer.invoke('backup:getInfo')
+    getInfo: () => ipcRenderer.invoke('backup:getInfo'),
+    getHistory: () => ipcRenderer.invoke('backup:getHistory'),
+    autoConfig: (config) => ipcRenderer.invoke('backup:autoConfig', config),
+    getAutoConfig: () => ipcRenderer.invoke('backup:getAutoConfig')
+  },
+
+  // System
+  system: {
+    resetAll: () => ipcRenderer.invoke('system:resetAll')
+  },
+
+  // Segments
+  segments: {
+    getAll: () => ipcRenderer.invoke('segments:getAll'),
+    get: (id) => ipcRenderer.invoke('segments:get', id),
+    add: (segment) => ipcRenderer.invoke('segments:add', segment),
+    update: (segment) => ipcRenderer.invoke('segments:update', segment),
+    delete: (id) => ipcRenderer.invoke('segments:delete', id),
+    getContacts: (filters) => ipcRenderer.invoke('segments:getContacts', filters),
+    count: (filters) => ipcRenderer.invoke('segments:count', filters)
+  },
+
+  // Retry Queue
+  retry: {
+    getStats: () => ipcRenderer.invoke('retry:getStats'),
+    clear: (campaignId) => ipcRenderer.invoke('retry:clear', campaignId)
+  },
+
+  // Deliverability
+  deliverability: {
+    getHistory: (smtpAccountId) => ipcRenderer.invoke('deliverability:getHistory', smtpAccountId),
+    getScore: (smtpAccountId) => ipcRenderer.invoke('deliverability:getScore', smtpAccountId)
+  },
+
+  // Global Search
+  search: {
+    global: (query) => ipcRenderer.invoke('search:global', query)
+  },
+
+  // SMTP detailed test
+  smtpTest: {
+    detailed: (account) => ipcRenderer.invoke('smtp:testDetailed', account)
+  },
+
+  // DNS checking
+  dns: {
+    check: (domain) => ipcRenderer.invoke('dns:check', domain)
+  },
+
+  // Real-time data change listener â€” fires whenever main process writes data
+  onDataChanged: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('data:changed', handler);
+    return () => ipcRenderer.removeListener('data:changed', handler);
+  },
+
+  // Real-time tracking unsubscribe listener â€” fires when someone unsubscribes via tracking server
+  onTrackingUnsubscribe: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('tracking:unsubscribe', handler);
+    return () => ipcRenderer.removeListener('tracking:unsubscribe', handler);
+  },
+
+  // Tray â†’ renderer navigation: fires when the user clicks "Settings" in the system tray menu
+  onNavigatePage: (callback) => {
+    const handler = (event, page) => callback(page);
+    ipcRenderer.on('navigate:page', handler);
+    return () => ipcRenderer.removeListener('navigate:page', handler);
   }
 });

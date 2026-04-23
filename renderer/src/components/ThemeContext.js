@@ -16,7 +16,6 @@ export function ThemeProvider({ children }) {
           }
         }
       } catch (error) {
-        console.error('Failed to load theme:', error);
       }
     };
     loadTheme();
@@ -35,7 +34,6 @@ export function ThemeProvider({ children }) {
         await window.electron.settings.save({ ...settings, theme: newTheme });
       }
     } catch (error) {
-      console.error('Failed to save theme:', error);
     }
   };
 

@@ -1,1164 +1,1790 @@
-const initSqlJs = require('sql.js');
-const fs = require('fs');
 const path = require('path');
+const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 
-class BulkyDatabase {
+class Database {
   constructor(dbPath) {
     this.dbPath = dbPath;
     this.db = null;
     this.SQL = null;
+    this._saveTimer = null;
+    this._saveDebounceMs = 1500; // batch rapid writes into a single disk flush
   }
 
-  async init() {
+  async initialize() {
+    const initSqlJs = require('sql.js');
     this.SQL = await initSqlJs();
-    
+
     if (fs.existsSync(this.dbPath)) {
-      const buffer = fs.readFileSync(this.dbPath);
-      this.db = new this.SQL.Database(buffer);
-      this.migrateSchema();
+      const fileBuffer = fs.readFileSync(this.dbPath);
+      this.db = new this.SQL.Database(fileBuffer);
     } else {
       this.db = new this.SQL.Database();
     }
-    
-    this.initialize();
+
+    this._createTables();
+    this._migrateSchema();
+    this._save();
+
+    // Database integrity check
+    this._checkIntegrity();
+
+    // Auto-save every 30 seconds as crash safety net
+    this._autoSaveInterval = setInterval(() => {
+      this._save();
+    }, 30000);
+
     return this;
   }
 
-  save() {
+  _checkIntegrity() {
+    try { // DB integrity check - errors are non-fatal but logged
+      // Check for database corruption
+      const integrity = this.db.exec("PRAGMA integrity_check");
+      if (integrity[0]?.values?.[0]?.[0] !== 'ok') {
+        // Attempt repair
+        this.db.exec("REINDEX");
+        this.db.exec("VACUUM");
+      }
+
+      // Check foreign key constraints
+      this.db.exec("PRAGMA foreign_keys = ON");
+
+      // Optimize database
+      this.db.exec("PRAGMA optimize");
+    } catch (e) {
+      console.warn('DB integrity check error (non-fatal):', e.message);
+    }
+  }
+
+  _save() {
     const data = this.db.export();
     const buffer = Buffer.from(data);
     fs.writeFileSync(this.dbPath, buffer);
   }
 
-  migrateSchema() {
-    const migrations = [
-      // Contacts table migrations
-      { table: 'contacts', column: 'company', type: 'TEXT' },
-      { table: 'contacts', column: 'phone', type: 'TEXT' },
-      { table: 'contacts', column: 'customField1', type: 'TEXT' },
-      { table: 'contacts', column: 'customField2', type: 'TEXT' },
-      { table: 'contacts', column: 'tags', type: "TEXT DEFAULT '[]'" },
-      { table: 'contacts', column: 'verificationScore', type: 'INTEGER DEFAULT 0' },
-      { table: 'contacts', column: 'verificationMethod', type: 'TEXT' },
-      { table: 'contacts', column: 'verificationDetails', type: 'TEXT' },
-      { table: 'contacts', column: 'engagementScore', type: 'INTEGER DEFAULT 0' },
-      { table: 'contacts', column: 'totalOpens', type: 'INTEGER DEFAULT 0' },
-      { table: 'contacts', column: 'totalClicks', type: 'INTEGER DEFAULT 0' },
-      { table: 'contacts', column: 'lastOpenedAt', type: 'TEXT' },
-      { table: 'contacts', column: 'lastClickedAt', type: 'TEXT' },
-      { table: 'contacts', column: 'bounceCount', type: 'INTEGER DEFAULT 0' },
-      { table: 'contacts', column: 'lastBounceReason', type: 'TEXT' },
-      { table: 'contacts', column: 'lastBounceAt', type: 'TEXT' },
-      { table: 'contacts', column: 'isDisposable', type: 'INTEGER DEFAULT 0' },
-      { table: 'contacts', column: 'isRoleBased', type: 'INTEGER DEFAULT 0' },
-      { table: 'contacts', column: 'isCatchAll', type: 'INTEGER DEFAULT 0' },
-      // Templates table migrations
-      { table: 'templates', column: 'category', type: "TEXT DEFAULT 'general'" },
-      // Campaigns table migrations
-      { table: 'campaigns', column: 'subjectB', type: 'TEXT' },
-      { table: 'campaigns', column: 'contentB', type: 'TEXT' },
-      { table: 'campaigns', column: 'isABTest', type: 'INTEGER DEFAULT 0' },
-      { table: 'campaigns', column: 'abTestPercent', type: 'INTEGER DEFAULT 10' },
-      { table: 'campaigns', column: 'abWinner', type: 'TEXT' },
-      { table: 'campaigns', column: 'openedEmails', type: 'INTEGER DEFAULT 0' },
-      { table: 'campaigns', column: 'clickedEmails', type: 'INTEGER DEFAULT 0' },
-      { table: 'campaigns', column: 'bouncedEmails', type: 'INTEGER DEFAULT 0' },
-      { table: 'campaigns', column: 'softBouncedEmails', type: 'INTEGER DEFAULT 0' },
-      // SMTP settings migrations
-      { table: 'smtp_settings', column: 'replyTo', type: 'TEXT' },
-      { table: 'smtp_settings', column: 'unsubscribeEmail', type: 'TEXT' },
-      { table: 'smtp_settings', column: 'unsubscribeUrl', type: 'TEXT' },
-      // Campaign logs migrations
-      { table: 'campaign_logs', column: 'variant', type: "TEXT DEFAULT 'A'" },
-      { table: 'campaign_logs', column: 'smtpCode', type: 'INTEGER' },
-      { table: 'campaign_logs', column: 'smtpResponse', type: 'TEXT' },
-      { table: 'campaign_logs', column: 'failureType', type: 'TEXT' },
-      { table: 'campaign_logs', column: 'failureReason', type: 'TEXT' },
-      { table: 'campaign_logs', column: 'trackingId', type: 'TEXT' },
-      { table: 'campaign_logs', column: 'openedAt', type: 'TEXT' },
-      { table: 'campaign_logs', column: 'clickedAt', type: 'TEXT' },
-      // Blacklist migrations
-      { table: 'blacklist', column: 'bounceType', type: 'TEXT' },
-      { table: 'blacklist', column: 'smtpCode', type: 'INTEGER' },
-    ];
+  // Debounced save — batches rapid writes (e.g. per-email campaign logging)
+  // into a single disk flush after a quiet period, preventing I/O thrashing.
+  _saveDebounced() {
+    if (this._saveTimer) clearTimeout(this._saveTimer);
+    this._saveTimer = setTimeout(() => {
+      this._saveTimer = null;
+      this._save();
+    }, this._saveDebounceMs);
+  }
 
-    for (const migration of migrations) {
-      try {
-        this.db.run(`ALTER TABLE ${migration.table} ADD COLUMN ${migration.column} ${migration.type}`);
-      } catch (e) {}
+  // Flush any pending debounced write immediately (call before app exit / backup)
+  flushSave() {
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    this._save(); // flush any pending debounced write immediately
+  }
+
+  dispose() {
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    if (this._autoSaveInterval) {
+      clearInterval(this._autoSaveInterval);
+      this._autoSaveInterval = null;
+    }
+
+    if (this.db) {
+      // Use flushSave() to guarantee any pending debounced write is committed
+      // before the underlying sql.js db object is closed and nulled.
+      this.flushSave();
+      try { this.db.close(); } catch (e) {}
+      this.db = null;
     }
   }
 
-  initialize() {
-    // Lists table
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS lists (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        description TEXT,
-        createdAt TEXT DEFAULT CURRENT_TIMESTAMP,
-        updatedAt TEXT DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
+  _run(sql, params = []) {
+    this.db.run(sql, params);
+    this._saveDebounced(); // batch writes; flush explicitly on shutdown
+  }
 
-    // Tags table
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS tags (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL UNIQUE,
-        color TEXT DEFAULT '#5bb4d4',
-        createdAt TEXT DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
+  _get(sql, params = []) {
+    try {
+      const stmt = this.db.prepare(sql);
+      stmt.bind(params);
+      let result = null;
+      if (stmt.step()) {
+        result = stmt.getAsObject();
+      }
+      stmt.free();
+      return result;
+    } catch (e) {
+      if (e.message && e.message.includes('no such column')) {
+        return null;
+      }
+      throw e;
+    }
+  }
 
-    // Contacts table with enhanced verification fields
+  _all(sql, params = []) {
+    try {
+      const stmt = this.db.prepare(sql);
+      stmt.bind(params);
+      const results = [];
+      while (stmt.step()) {
+        results.push(stmt.getAsObject());
+      }
+      stmt.free();
+      return results;
+    } catch (e) {
+      // If query fails due to missing column in ORDER BY, retry without ORDER BY
+      if (e.message && e.message.includes('no such column') && sql.includes('ORDER BY')) {
+        const stripped = sql.replace(/\s+ORDER BY\s+[^\s,)]+(\s+(ASC|DESC))?/gi, '');
+        const stmt = this.db.prepare(stripped);
+        stmt.bind(params);
+        const results = [];
+        while (stmt.step()) {
+          results.push(stmt.getAsObject());
+        }
+        stmt.free();
+        return results;
+      }
+      throw e;
+    }
+  }
+
+  _createTables() {
     this.db.run(`
       CREATE TABLE IF NOT EXISTS contacts (
         id TEXT PRIMARY KEY,
         email TEXT NOT NULL UNIQUE,
-        firstName TEXT,
-        lastName TEXT,
-        company TEXT,
-        phone TEXT,
-        customField1 TEXT,
-        customField2 TEXT,
-        listId TEXT,
+        firstName TEXT DEFAULT '',
+        lastName TEXT DEFAULT '',
+        company TEXT DEFAULT '',
+        phone TEXT DEFAULT '',
+        customField1 TEXT DEFAULT '',
+        customField2 TEXT DEFAULT '',
         tags TEXT DEFAULT '[]',
-        status TEXT DEFAULT 'active',
-        verified INTEGER DEFAULT 0,
+        listId TEXT DEFAULT '',
+        verificationStatus TEXT DEFAULT 'unverified',
         verificationScore INTEGER DEFAULT 0,
-        verificationMethod TEXT,
-        verificationDetails TEXT,
-        engagementScore INTEGER DEFAULT 0,
-        totalOpens INTEGER DEFAULT 0,
-        totalClicks INTEGER DEFAULT 0,
-        lastOpenedAt TEXT,
-        lastClickedAt TEXT,
+        verificationDetails TEXT DEFAULT '{}',
         bounceCount INTEGER DEFAULT 0,
-        lastBounceReason TEXT,
-        lastBounceAt TEXT,
-        isDisposable INTEGER DEFAULT 0,
-        isRoleBased INTEGER DEFAULT 0,
-        isCatchAll INTEGER DEFAULT 0,
-        createdAt TEXT DEFAULT CURRENT_TIMESTAMP,
-        updatedAt TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (listId) REFERENCES lists(id) ON DELETE SET NULL
+        lastBounceReason TEXT DEFAULT '',
+        status TEXT DEFAULT 'active',
+        createdAt TEXT DEFAULT (datetime('now')),
+        updatedAt TEXT DEFAULT (datetime('now'))
       )
     `);
 
-    // Blacklist table with bounce tracking
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS lists (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        color TEXT DEFAULT '#6366f1',
+        createdAt TEXT DEFAULT (datetime('now'))
+      )
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS tags (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        color TEXT DEFAULT '#6366f1',
+        createdAt TEXT DEFAULT (datetime('now'))
+      )
+    `);
+
     this.db.run(`
       CREATE TABLE IF NOT EXISTS blacklist (
         id TEXT PRIMARY KEY,
-        email TEXT UNIQUE,
-        domain TEXT,
-        reason TEXT,
+        email TEXT NOT NULL UNIQUE,
+        reason TEXT DEFAULT '',
         source TEXT DEFAULT 'manual',
-        bounceType TEXT,
-        smtpCode INTEGER,
-        createdAt TEXT DEFAULT CURRENT_TIMESTAMP
+        createdAt TEXT DEFAULT (datetime('now'))
       )
     `);
 
-    // Templates table
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS unsubscribes (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        campaignId TEXT DEFAULT '',
+        reason TEXT DEFAULT '',
+        createdAt TEXT DEFAULT (datetime('now'))
+      )
+    `);
+
     this.db.run(`
       CREATE TABLE IF NOT EXISTS templates (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
-        subject TEXT NOT NULL,
-        content TEXT NOT NULL,
+        subject TEXT DEFAULT '',
+        content TEXT DEFAULT '',
         category TEXT DEFAULT 'general',
-        createdAt TEXT DEFAULT CURRENT_TIMESTAMP,
-        updatedAt TEXT DEFAULT CURRENT_TIMESTAMP
+        blocks TEXT DEFAULT '[]',
+        createdAt TEXT DEFAULT (datetime('now')),
+        updatedAt TEXT DEFAULT (datetime('now'))
       )
     `);
 
-    // SMTP Accounts table
     this.db.run(`
       CREATE TABLE IF NOT EXISTS smtp_accounts (
         id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
+        name TEXT DEFAULT '',
         host TEXT NOT NULL,
         port INTEGER DEFAULT 587,
         secure INTEGER DEFAULT 0,
         username TEXT NOT NULL,
         password TEXT NOT NULL,
-        fromName TEXT,
-        fromEmail TEXT,
-        replyTo TEXT,
+        fromName TEXT DEFAULT '',
+        fromEmail TEXT DEFAULT '',
+        replyTo TEXT DEFAULT '',
         dailyLimit INTEGER DEFAULT 500,
         sentToday INTEGER DEFAULT 0,
-        lastResetDate TEXT,
+        lastResetDate TEXT DEFAULT '',
         isActive INTEGER DEFAULT 1,
-        priority INTEGER DEFAULT 1,
-        createdAt TEXT DEFAULT CURRENT_TIMESTAMP,
-        updatedAt TEXT DEFAULT CURRENT_TIMESTAMP
+        isDefault INTEGER DEFAULT 0,
+        warmUpEnabled INTEGER DEFAULT 0,
+        warmUpStartDate TEXT DEFAULT '',
+        warmUpSchedule TEXT DEFAULT '',
+        rejectUnauthorized INTEGER DEFAULT 1,
+        unsubscribeEmail TEXT DEFAULT '',
+        dkimDomain TEXT DEFAULT '',
+        dkimSelector TEXT DEFAULT '',
+        dkimPrivateKey TEXT DEFAULT '',
+        createdAt TEXT DEFAULT (datetime('now')),
+        updatedAt TEXT DEFAULT (datetime('now'))
       )
     `);
 
-    // Campaigns table with bounce tracking
     this.db.run(`
       CREATE TABLE IF NOT EXISTS campaigns (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
-        subject TEXT NOT NULL,
-        subjectB TEXT,
-        content TEXT NOT NULL,
-        contentB TEXT,
+        subject TEXT DEFAULT '',
+        content TEXT DEFAULT '',
+        subjectB TEXT DEFAULT '',
+        contentB TEXT DEFAULT '',
         isABTest INTEGER DEFAULT 0,
         abTestPercent INTEGER DEFAULT 10,
-        abWinner TEXT,
-        listId TEXT,
-        selectedTags TEXT,
         status TEXT DEFAULT 'draft',
+        listId TEXT DEFAULT '',
+        tagFilter TEXT DEFAULT '',
+        manualEmails TEXT DEFAULT '',
+        verificationFilter TEXT DEFAULT '',
+        smtpAccountId TEXT DEFAULT '',
+        batchSize INTEGER DEFAULT 50,
+        delayMinutes INTEGER DEFAULT 10,
+        delayBetweenEmails INTEGER DEFAULT 2000,
+        maxRetries INTEGER DEFAULT 3,
         totalEmails INTEGER DEFAULT 0,
         sentEmails INTEGER DEFAULT 0,
         failedEmails INTEGER DEFAULT 0,
-        openedEmails INTEGER DEFAULT 0,
-        clickedEmails INTEGER DEFAULT 0,
         bouncedEmails INTEGER DEFAULT 0,
-        softBouncedEmails INTEGER DEFAULT 0,
-        batchSize INTEGER DEFAULT 50,
-        delayMinutes INTEGER DEFAULT 10,
-        scheduledAt TEXT,
-        startedAt TEXT,
-        completedAt TEXT,
-        createdAt TEXT DEFAULT CURRENT_TIMESTAMP,
-        updatedAt TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (listId) REFERENCES lists(id) ON DELETE SET NULL
+        scheduledAt TEXT DEFAULT '',
+        startedAt TEXT DEFAULT '',
+        completedAt TEXT DEFAULT '',
+        createdAt TEXT DEFAULT (datetime('now')),
+        updatedAt TEXT DEFAULT (datetime('now'))
       )
     `);
 
-    // Campaign logs with full SMTP tracking
     this.db.run(`
       CREATE TABLE IF NOT EXISTS campaign_logs (
         id TEXT PRIMARY KEY,
         campaignId TEXT NOT NULL,
-        contactId TEXT,
+        contactId TEXT DEFAULT '',
         email TEXT NOT NULL,
-        status TEXT NOT NULL,
+        status TEXT DEFAULT 'pending',
         variant TEXT DEFAULT 'A',
-        smtpCode INTEGER,
-        smtpResponse TEXT,
-        failureType TEXT,
-        failureReason TEXT,
-        trackingId TEXT,
-        openedAt TEXT,
-        clickedAt TEXT,
-        error TEXT,
-        sentAt TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (campaignId) REFERENCES campaigns(id) ON DELETE CASCADE
+        smtpCode INTEGER DEFAULT NULL,
+        smtpResponse TEXT DEFAULT '',
+        failureType TEXT DEFAULT '',
+        failureReason TEXT DEFAULT '',
+        trackingId TEXT DEFAULT '',
+        openedAt TEXT DEFAULT '',
+        clickedAt TEXT DEFAULT '',
+        error TEXT DEFAULT '',
+        createdAt TEXT DEFAULT (datetime('now'))
       )
     `);
 
-    // Email tracking table
     this.db.run(`
-      CREATE TABLE IF NOT EXISTS email_tracking (
+      CREATE TABLE IF NOT EXISTS tracking_events (
         id TEXT PRIMARY KEY,
         campaignId TEXT NOT NULL,
-        contactId TEXT,
-        email TEXT NOT NULL,
+        contactId TEXT DEFAULT '',
+        email TEXT DEFAULT '',
         type TEXT NOT NULL,
-        link TEXT,
-        userAgent TEXT,
-        ipAddress TEXT,
-        createdAt TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (campaignId) REFERENCES campaigns(id) ON DELETE CASCADE
+        link TEXT DEFAULT '',
+        userAgent TEXT DEFAULT '',
+        ipAddress TEXT DEFAULT '',
+        client TEXT DEFAULT '',
+        device TEXT DEFAULT '',
+        os TEXT DEFAULT '',
+        isBot INTEGER DEFAULT 0,
+        country TEXT DEFAULT '',
+        region TEXT DEFAULT '',
+        createdAt TEXT DEFAULT (datetime('now'))
       )
     `);
 
-    // Unsubscribes table
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS unsubscribes (
-        id TEXT PRIMARY KEY,
-        email TEXT NOT NULL UNIQUE,
-        campaignId TEXT,
-        reason TEXT,
-        unsubscribedAt TEXT DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // Spam replacements table
     this.db.run(`
       CREATE TABLE IF NOT EXISTS spam_replacements (
         id TEXT PRIMARY KEY,
-        spamWord TEXT NOT NULL UNIQUE,
-        replacement TEXT NOT NULL,
+        spamWord TEXT NOT NULL,
+        replacement TEXT DEFAULT '',
         category TEXT DEFAULT 'general',
-        isActive INTEGER DEFAULT 1
+        createdAt TEXT DEFAULT (datetime('now'))
       )
     `);
 
-    // Legacy SMTP settings
     this.db.run(`
-      CREATE TABLE IF NOT EXISTS smtp_settings (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        host TEXT,
-        port INTEGER DEFAULT 587,
-        secure INTEGER DEFAULT 0,
-        username TEXT,
-        password TEXT,
-        fromName TEXT,
-        fromEmail TEXT,
-        replyTo TEXT,
-        unsubscribeEmail TEXT,
-        unsubscribeUrl TEXT,
-        updatedAt TEXT DEFAULT CURRENT_TIMESTAMP
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT DEFAULT ''
       )
     `);
 
-    // App settings table
     this.db.run(`
-      CREATE TABLE IF NOT EXISTS app_settings (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        theme TEXT DEFAULT 'light',
-        defaultBatchSize INTEGER DEFAULT 50,
-        defaultDelayMinutes INTEGER DEFAULT 10,
-        maxRetriesPerEmail INTEGER DEFAULT 2,
-        enableTracking INTEGER DEFAULT 1,
-        trackingDomain TEXT,
-        enableSmtpVerification INTEGER DEFAULT 1,
-        updatedAt TEXT DEFAULT CURRENT_TIMESTAMP
+      CREATE TABLE IF NOT EXISTS warmup_schedules (
+        id TEXT PRIMARY KEY,
+        smtpAccountId TEXT NOT NULL,
+        schedule TEXT DEFAULT '{}',
+        isActive INTEGER DEFAULT 1,
+        createdAt TEXT DEFAULT (datetime('now'))
       )
     `);
 
-    // Create indexes
-    try {
-      this.db.run(`CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(email)`);
-      this.db.run(`CREATE INDEX IF NOT EXISTS idx_contacts_listId ON contacts(listId)`);
-      this.db.run(`CREATE INDEX IF NOT EXISTS idx_contacts_verified ON contacts(verified)`);
-      this.db.run(`CREATE INDEX IF NOT EXISTS idx_contacts_bounceCount ON contacts(bounceCount)`);
-      this.db.run(`CREATE INDEX IF NOT EXISTS idx_campaign_logs_campaignId ON campaign_logs(campaignId)`);
-      this.db.run(`CREATE INDEX IF NOT EXISTS idx_campaign_logs_status ON campaign_logs(status)`);
-      this.db.run(`CREATE INDEX IF NOT EXISTS idx_campaign_logs_trackingId ON campaign_logs(trackingId)`);
-      this.db.run(`CREATE INDEX IF NOT EXISTS idx_blacklist_email ON blacklist(email)`);
-      this.db.run(`CREATE INDEX IF NOT EXISTS idx_blacklist_domain ON blacklist(domain)`);
-      this.db.run(`CREATE INDEX IF NOT EXISTS idx_tracking_campaignId ON email_tracking(campaignId)`);
-      this.db.run(`CREATE INDEX IF NOT EXISTS idx_unsubscribes_email ON unsubscribes(email)`);
-    } catch (e) {}
+    // Segments for contact segmentation
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS segments (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        filters TEXT DEFAULT '{}',
+        contactCount INTEGER DEFAULT 0,
+        createdAt TEXT DEFAULT (datetime('now')),
+        updatedAt TEXT DEFAULT (datetime('now'))
+      )
+    `);
 
-    // Migrations for new columns
-    try { this.db.run(`ALTER TABLE campaigns ADD COLUMN selectedTags TEXT`); } catch (e) {}
+    // Retry queue for failed emails
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS retry_queue (
+        id TEXT PRIMARY KEY,
+        campaignId TEXT NOT NULL,
+        contactId TEXT DEFAULT '',
+        email TEXT NOT NULL,
+        subject TEXT DEFAULT '',
+        content TEXT DEFAULT '',
+        variant TEXT DEFAULT 'A',
+        attempts INTEGER DEFAULT 0,
+        maxAttempts INTEGER DEFAULT 3,
+        lastError TEXT DEFAULT '',
+        nextRetryAt TEXT DEFAULT '',
+        status TEXT DEFAULT 'pending',
+        createdAt TEXT DEFAULT (datetime('now'))
+      )
+    `);
 
-    // Initialize default settings
-    const smtpExists = this.db.exec('SELECT id FROM smtp_settings WHERE id = 1');
-    if (smtpExists.length === 0 || smtpExists[0].values.length === 0) {
-      this.db.run('INSERT OR IGNORE INTO smtp_settings (id) VALUES (1)');
-    }
+    // Deliverability metrics per SMTP account over time
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS deliverability_log (
+        id TEXT PRIMARY KEY,
+        smtpAccountId TEXT NOT NULL,
+        date TEXT NOT NULL,
+        sent INTEGER DEFAULT 0,
+        delivered INTEGER DEFAULT 0,
+        bounced INTEGER DEFAULT 0,
+        complained INTEGER DEFAULT 0,
+        opened INTEGER DEFAULT 0,
+        clicked INTEGER DEFAULT 0,
+        score REAL DEFAULT 100,
+        createdAt TEXT DEFAULT (datetime('now'))
+      )
+    `);
 
-    const settingsExists = this.db.exec('SELECT id FROM app_settings WHERE id = 1');
-    if (settingsExists.length === 0 || settingsExists[0].values.length === 0) {
-      this.db.run('INSERT OR IGNORE INTO app_settings (id) VALUES (1)');
-    }
+    // Backup history
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS backup_history (
+        id TEXT PRIMARY KEY,
+        filename TEXT NOT NULL,
+        size INTEGER DEFAULT 0,
+        type TEXT DEFAULT 'manual',
+        createdAt TEXT DEFAULT (datetime('now'))
+      )
+    `);
 
-    this.initializeSpamReplacements();
-    this.save();
   }
 
-  initializeSpamReplacements() {
-    const defaults = [
-      { word: 'free', replacement: 'complimentary', category: 'pricing' },
-      { word: 'buy now', replacement: 'get started today', category: 'cta' },
-      { word: 'click here', replacement: 'learn more', category: 'cta' },
-      { word: 'act now', replacement: 'take action today', category: 'urgency' },
-      { word: 'limited time', replacement: 'available until', category: 'urgency' },
-      { word: 'urgent', replacement: 'important', category: 'urgency' },
-      { word: 'winner', replacement: 'selected recipient', category: 'claims' },
-      { word: 'congratulations', replacement: 'great news', category: 'claims' },
-      { word: 'guarantee', replacement: 'commitment', category: 'claims' },
-      { word: 'order now', replacement: 'place your order', category: 'cta' },
-      { word: 'special offer', replacement: 'exclusive opportunity', category: 'pricing' },
-      { word: 'earn money', replacement: 'generate income', category: 'money' },
-      { word: 'make money', replacement: 'build revenue', category: 'money' },
-      { word: 'cash', replacement: 'funds', category: 'money' },
-      { word: 'double your', replacement: 'increase your', category: 'claims' },
-      { word: 'million dollars', replacement: 'significant amount', category: 'money' },
-      { word: 'work from home', replacement: 'remote opportunity', category: 'claims' },
-      { word: 'no obligation', replacement: 'no commitment required', category: 'claims' },
-      { word: 'risk free', replacement: 'worry-free', category: 'claims' },
-      { word: 'exclusive deal', replacement: 'special opportunity', category: 'pricing' }
+  // Migrate schema: add missing columns to existing tables from older versions
+  _migrateSchema() {
+    const migrations = [
+      // contacts table - columns that may not exist in older DBs
+      { table: 'contacts', column: 'verificationStatus', sql: "ALTER TABLE contacts ADD COLUMN verificationStatus TEXT DEFAULT 'unverified'" },
+      { table: 'contacts', column: 'verificationScore', sql: "ALTER TABLE contacts ADD COLUMN verificationScore INTEGER DEFAULT 0" },
+      { table: 'contacts', column: 'verificationDetails', sql: "ALTER TABLE contacts ADD COLUMN verificationDetails TEXT DEFAULT '{}'" },
+      { table: 'contacts', column: 'bounceCount', sql: "ALTER TABLE contacts ADD COLUMN bounceCount INTEGER DEFAULT 0" },
+      { table: 'contacts', column: 'lastBounceReason', sql: "ALTER TABLE contacts ADD COLUMN lastBounceReason TEXT DEFAULT ''" },
+      { table: 'contacts', column: 'customField1', sql: "ALTER TABLE contacts ADD COLUMN customField1 TEXT DEFAULT ''" },
+      { table: 'contacts', column: 'customField2', sql: "ALTER TABLE contacts ADD COLUMN customField2 TEXT DEFAULT ''" },
+      { table: 'contacts', column: 'tags', sql: "ALTER TABLE contacts ADD COLUMN tags TEXT DEFAULT '[]'" },
+      { table: 'contacts', column: 'listId', sql: "ALTER TABLE contacts ADD COLUMN listId TEXT DEFAULT ''" },
+      { table: 'contacts', column: 'updatedAt', sql: "ALTER TABLE contacts ADD COLUMN updatedAt TEXT DEFAULT (datetime('now'))" },
+      { table: 'contacts', column: 'status', sql: "ALTER TABLE contacts ADD COLUMN status TEXT DEFAULT 'active'" },
+
+      // campaigns table
+      { table: 'campaigns', column: 'subjectB', sql: "ALTER TABLE campaigns ADD COLUMN subjectB TEXT DEFAULT ''" },
+      { table: 'campaigns', column: 'contentB', sql: "ALTER TABLE campaigns ADD COLUMN contentB TEXT DEFAULT ''" },
+      { table: 'campaigns', column: 'isABTest', sql: "ALTER TABLE campaigns ADD COLUMN isABTest INTEGER DEFAULT 0" },
+      { table: 'campaigns', column: 'abTestPercent', sql: "ALTER TABLE campaigns ADD COLUMN abTestPercent INTEGER DEFAULT 10" },
+      { table: 'campaigns', column: 'tagFilter', sql: "ALTER TABLE campaigns ADD COLUMN tagFilter TEXT DEFAULT ''" },
+      { table: 'campaigns', column: 'manualEmails', sql: "ALTER TABLE campaigns ADD COLUMN manualEmails TEXT DEFAULT ''" },
+      { table: 'campaigns', column: 'verificationFilter', sql: "ALTER TABLE campaigns ADD COLUMN verificationFilter TEXT DEFAULT ''" },
+      { table: 'campaigns', column: 'smtpAccountId', sql: "ALTER TABLE campaigns ADD COLUMN smtpAccountId TEXT DEFAULT ''" },
+      { table: 'campaigns', column: 'delayBetweenEmails', sql: "ALTER TABLE campaigns ADD COLUMN delayBetweenEmails INTEGER DEFAULT 2000" },
+      { table: 'campaigns', column: 'maxRetries', sql: "ALTER TABLE campaigns ADD COLUMN maxRetries INTEGER DEFAULT 3" },
+      { table: 'campaigns', column: 'bouncedEmails', sql: "ALTER TABLE campaigns ADD COLUMN bouncedEmails INTEGER DEFAULT 0" },
+      { table: 'campaigns', column: 'scheduledAt', sql: "ALTER TABLE campaigns ADD COLUMN scheduledAt TEXT DEFAULT ''" },
+      { table: 'campaigns', column: 'updatedAt', sql: "ALTER TABLE campaigns ADD COLUMN updatedAt TEXT DEFAULT (datetime('now'))" },
+
+      // campaign_logs table
+      { table: 'campaign_logs', column: 'variant', sql: "ALTER TABLE campaign_logs ADD COLUMN variant TEXT DEFAULT 'A'" },
+      { table: 'campaign_logs', column: 'smtpCode', sql: "ALTER TABLE campaign_logs ADD COLUMN smtpCode INTEGER DEFAULT NULL" },
+      { table: 'campaign_logs', column: 'smtpResponse', sql: "ALTER TABLE campaign_logs ADD COLUMN smtpResponse TEXT DEFAULT ''" },
+      { table: 'campaign_logs', column: 'failureType', sql: "ALTER TABLE campaign_logs ADD COLUMN failureType TEXT DEFAULT ''" },
+      { table: 'campaign_logs', column: 'failureReason', sql: "ALTER TABLE campaign_logs ADD COLUMN failureReason TEXT DEFAULT ''" },
+      { table: 'campaign_logs', column: 'trackingId', sql: "ALTER TABLE campaign_logs ADD COLUMN trackingId TEXT DEFAULT ''" },
+      { table: 'campaign_logs', column: 'openedAt', sql: "ALTER TABLE campaign_logs ADD COLUMN openedAt TEXT DEFAULT ''" },
+      { table: 'campaign_logs', column: 'clickedAt', sql: "ALTER TABLE campaign_logs ADD COLUMN clickedAt TEXT DEFAULT ''" },
+
+      // smtp_accounts table
+      { table: 'smtp_accounts', column: 'warmUpEnabled', sql: "ALTER TABLE smtp_accounts ADD COLUMN warmUpEnabled INTEGER DEFAULT 0" },
+      { table: 'smtp_accounts', column: 'warmUpStartDate', sql: "ALTER TABLE smtp_accounts ADD COLUMN warmUpStartDate TEXT DEFAULT ''" },
+      { table: 'smtp_accounts', column: 'warmUpSchedule', sql: "ALTER TABLE smtp_accounts ADD COLUMN warmUpSchedule TEXT DEFAULT ''" },
+      { table: 'smtp_accounts', column: 'rejectUnauthorized', sql: "ALTER TABLE smtp_accounts ADD COLUMN rejectUnauthorized INTEGER DEFAULT 1" },
+      { table: 'smtp_accounts', column: 'unsubscribeEmail', sql: "ALTER TABLE smtp_accounts ADD COLUMN unsubscribeEmail TEXT DEFAULT ''" },
+      { table: 'smtp_accounts', column: 'dkimDomain', sql: "ALTER TABLE smtp_accounts ADD COLUMN dkimDomain TEXT DEFAULT ''" },
+      { table: 'smtp_accounts', column: 'dkimSelector', sql: "ALTER TABLE smtp_accounts ADD COLUMN dkimSelector TEXT DEFAULT ''" },
+      { table: 'smtp_accounts', column: 'dkimPrivateKey', sql: "ALTER TABLE smtp_accounts ADD COLUMN dkimPrivateKey TEXT DEFAULT ''" },
+      { table: 'smtp_accounts', column: 'sentToday', sql: "ALTER TABLE smtp_accounts ADD COLUMN sentToday INTEGER DEFAULT 0" },
+      { table: 'smtp_accounts', column: 'lastResetDate', sql: "ALTER TABLE smtp_accounts ADD COLUMN lastResetDate TEXT DEFAULT ''" },
+      { table: 'smtp_accounts', column: 'isDefault', sql: "ALTER TABLE smtp_accounts ADD COLUMN isDefault INTEGER DEFAULT 0" },
+
+      // templates table
+      { table: 'templates', column: 'blocks', sql: "ALTER TABLE templates ADD COLUMN blocks TEXT DEFAULT '[]'" },
+
+      // blacklist table
+      { table: 'blacklist', column: 'source', sql: "ALTER TABLE blacklist ADD COLUMN source TEXT DEFAULT 'manual'" },
+
+      // createdAt columns on tables that older schemas may lack
+      { table: 'campaign_logs', column: 'createdAt', sql: "ALTER TABLE campaign_logs ADD COLUMN createdAt TEXT DEFAULT (datetime('now'))" },
+      { table: 'contacts', column: 'createdAt', sql: "ALTER TABLE contacts ADD COLUMN createdAt TEXT DEFAULT (datetime('now'))" },
+      { table: 'campaigns', column: 'createdAt', sql: "ALTER TABLE campaigns ADD COLUMN createdAt TEXT DEFAULT (datetime('now'))" },
+      { table: 'templates', column: 'createdAt', sql: "ALTER TABLE templates ADD COLUMN createdAt TEXT DEFAULT (datetime('now'))" },
+      { table: 'templates', column: 'updatedAt', sql: "ALTER TABLE templates ADD COLUMN updatedAt TEXT DEFAULT (datetime('now'))" },
+      { table: 'blacklist', column: 'createdAt', sql: "ALTER TABLE blacklist ADD COLUMN createdAt TEXT DEFAULT (datetime('now'))" },
+      { table: 'unsubscribes', column: 'createdAt', sql: "ALTER TABLE unsubscribes ADD COLUMN createdAt TEXT DEFAULT (datetime('now'))" },
+      { table: 'tracking_events', column: 'createdAt', sql: "ALTER TABLE tracking_events ADD COLUMN createdAt TEXT DEFAULT (datetime('now'))" },
+      { table: 'smtp_accounts', column: 'createdAt', sql: "ALTER TABLE smtp_accounts ADD COLUMN createdAt TEXT DEFAULT (datetime('now'))" },
+      { table: 'smtp_accounts', column: 'updatedAt', sql: "ALTER TABLE smtp_accounts ADD COLUMN updatedAt TEXT DEFAULT (datetime('now'))" },
+
+      // campaign resume support
+      { table: 'campaigns', column: 'resumeData', sql: "ALTER TABLE campaigns ADD COLUMN resumeData TEXT DEFAULT ''" },
+
+      // unsubscribe campaign tracking
+      { table: 'unsubscribes', column: 'campaignId', sql: "ALTER TABLE unsubscribes ADD COLUMN campaignId TEXT DEFAULT ''" },
+
+      // smtp account health score
+      { table: 'smtp_accounts', column: 'healthScore', sql: "ALTER TABLE smtp_accounts ADD COLUMN healthScore REAL DEFAULT 100" },
+
+      // tracking_events table columns
+      { table: 'tracking_events', column: 'client', sql: "ALTER TABLE tracking_events ADD COLUMN client TEXT DEFAULT ''" },
+      { table: 'tracking_events', column: 'device', sql: "ALTER TABLE tracking_events ADD COLUMN device TEXT DEFAULT ''" },
+      { table: 'tracking_events', column: 'os', sql: "ALTER TABLE tracking_events ADD COLUMN os TEXT DEFAULT ''" },
+      { table: 'tracking_events', column: 'isBot', sql: "ALTER TABLE tracking_events ADD COLUMN isBot INTEGER DEFAULT 0" },
+      { table: 'tracking_events', column: 'country', sql: "ALTER TABLE tracking_events ADD COLUMN country TEXT DEFAULT ''" },
+      { table: 'tracking_events', column: 'region', sql: "ALTER TABLE tracking_events ADD COLUMN region TEXT DEFAULT ''" },
     ];
 
-    for (const item of defaults) {
-      try {
-        this.db.run(`INSERT OR IGNORE INTO spam_replacements (id, spamWord, replacement, category) VALUES (?, ?, ?, ?)`,
-          [uuidv4(), item.word, item.replacement, item.category]);
-      } catch (e) {}
+    for (const m of migrations) {
+      if (!this._columnExists(m.table, m.column)) {
+        try {
+          this.db.run(m.sql);
+        } catch (e) {
+          // Ignore errors from already-applied migrations
+        }
+      }
+    }
+
+    // Now safe to create indexes (columns guaranteed to exist)
+    const indexes = [
+      'CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(email)',
+      'CREATE INDEX IF NOT EXISTS idx_contacts_listId ON contacts(listId)',
+      'CREATE INDEX IF NOT EXISTS idx_contacts_verification ON contacts(verificationStatus)',
+      'CREATE INDEX IF NOT EXISTS idx_campaign_logs_campaignId ON campaign_logs(campaignId)',
+      'CREATE INDEX IF NOT EXISTS idx_campaign_logs_trackingId ON campaign_logs(trackingId)',
+      'CREATE INDEX IF NOT EXISTS idx_tracking_events_campaignId ON tracking_events(campaignId)',
+      'CREATE INDEX IF NOT EXISTS idx_blacklist_email ON blacklist(email)',
+      'CREATE INDEX IF NOT EXISTS idx_unsubscribes_email ON unsubscribes(email)',
+    ];
+    for (const idx of indexes) {
+      try { this.db.run(idx); } catch (e) {}
+    }
+
+    this._ensureDefaultSmtpAccount();
+  }
+
+  _columnExists(table, column) {
+    try {
+      const info = this._all(`PRAGMA table_info(${table})`);
+      return info.some(col => col.name === column);
+    } catch (e) {
+      return false;
     }
   }
 
-  resultToObjects(result) {
-    if (!result || result.length === 0) return [];
-    const columns = result[0].columns;
-    const values = result[0].values;
-    return values.map(row => {
-      const obj = {};
-      columns.forEach((col, i) => { obj[col] = row[i]; });
-      return obj;
-    });
-  }
-
-  // ==================== CONTACTS ====================
+  // =================== CONTACTS ===================
   getAllContacts() {
-    const result = this.db.exec(`
-      SELECT c.*, l.name as listName 
-      FROM contacts c 
-      LEFT JOIN lists l ON c.listId = l.id 
-      ORDER BY c.createdAt DESC
-    `);
-    return this.resultToObjects(result);
+    return this._all('SELECT * FROM contacts ORDER BY createdAt DESC');
   }
 
-  getContactsByFilter(filter = {}) {
-    let query = `SELECT c.*, l.name as listName FROM contacts c LEFT JOIN lists l ON c.listId = l.id WHERE 1=1`;
+  getFilteredContacts(filter) {
+    let sql = 'SELECT * FROM contacts WHERE 1=1';
     const params = [];
 
-    if (filter.listId) { query += ` AND c.listId = ?`; params.push(filter.listId); }
-    if (filter.status) { query += ` AND c.status = ?`; params.push(filter.status); }
-    if (filter.verified !== undefined && filter.verified !== '') { 
-      query += ` AND c.verified = ?`; params.push(filter.verified === '1' || filter.verified === 1 ? 1 : 0); 
+    if (filter.listId) {
+      sql += ' AND listId = ?';
+      params.push(filter.listId);
+    }
+    if (filter.tag) {
+      sql += ' AND tags LIKE ?';
+      params.push(`%${filter.tag}%`);
+    }
+    if (filter.verificationStatus) {
+      sql += ' AND verificationStatus = ?';
+      params.push(filter.verificationStatus);
     }
     if (filter.search) {
-      query += ` AND (c.email LIKE ? OR c.firstName LIKE ? OR c.lastName LIKE ? OR c.company LIKE ?)`;
-      const s = `%${filter.search}%`; params.push(s, s, s, s);
+      sql += ' AND (email LIKE ? OR firstName LIKE ? OR lastName LIKE ? OR company LIKE ?)';
+      const s = `%${filter.search}%`;
+      params.push(s, s, s, s);
     }
-    if (filter.tag) { query += ` AND c.tags LIKE ?`; params.push(`%"${filter.tag}"%`); }
-    if (filter.hasBounced) { query += ` AND c.bounceCount > 0`; }
-    if (filter.isDisposable) { query += ` AND c.isDisposable = 1`; }
-    if (filter.isRoleBased) { query += ` AND c.isRoleBased = 1`; }
 
-    query += ` ORDER BY c.${filter.sortBy || 'createdAt'} ${filter.sortOrder || 'DESC'}`;
-    if (filter.limit) { query += ` LIMIT ?`; params.push(filter.limit); }
-
-    const result = this.db.exec(query, params);
-    return this.resultToObjects(result);
+    sql += ' ORDER BY createdAt DESC';
+    return this._all(sql, params);
   }
 
-  // Get recipient count for campaign targeting (with tag support)
-  getRecipientCount(filter = {}) {
-    let query = `SELECT COUNT(*) as count FROM contacts c WHERE c.status = 'active'`;
-    const params = [];
+  getContactsPage(params) {
+    const page = params.page || 1;
+    const limit = params.perPage || params.limit || 50;
+    const offset = (page - 1) * limit;
 
-    if (filter.listId) { 
-      query += ` AND c.listId = ?`; 
-      params.push(filter.listId); 
+    let countSql = 'SELECT COUNT(*) as total FROM contacts WHERE 1=1';
+    let sql = 'SELECT * FROM contacts WHERE 1=1';
+    const countParams = [];
+    const queryParams = [];
+
+    if (params.listId) {
+      countSql += ' AND listId = ?';
+      sql += ' AND listId = ?';
+      countParams.push(params.listId);
+      queryParams.push(params.listId);
     }
-    
-    // Tag filtering - contact must have ALL selected tags
-    if (filter.tags && filter.tags.length > 0) {
-      for (const tagId of filter.tags) {
-        query += ` AND c.tags LIKE ?`;
-        params.push(`%"${tagId}"%`);
-      }
+    if (params.status) {
+      countSql += ' AND status = ?';
+      sql += ' AND status = ?';
+      countParams.push(params.status);
+      queryParams.push(params.status);
+    }
+    if (params.tag) {
+      countSql += ' AND tags LIKE ?';
+      sql += ' AND tags LIKE ?';
+      const tagParam = `%${params.tag}%`;
+      countParams.push(tagParam);
+      queryParams.push(tagParam);
+    }
+    if (params.verificationStatus) {
+      countSql += ' AND verificationStatus = ?';
+      sql += ' AND verificationStatus = ?';
+      countParams.push(params.verificationStatus);
+      queryParams.push(params.verificationStatus);
+    }
+    if (params.search) {
+      const searchClause = ' AND (email LIKE ? OR firstName LIKE ? OR lastName LIKE ? OR company LIKE ?)';
+      countSql += searchClause;
+      sql += searchClause;
+      const s = `%${params.search}%`;
+      countParams.push(s, s, s, s);
+      queryParams.push(s, s, s, s);
     }
 
-    // Exclude bounced, blacklisted, unsubscribed
-    query += ` AND c.bounceCount < 2`;
-    query += ` AND c.email NOT IN (SELECT email FROM blacklist WHERE email IS NOT NULL)`;
-    query += ` AND c.email NOT IN (SELECT email FROM unsubscribes WHERE email IS NOT NULL)`;
+    // Dynamic sort — whitelist columns to prevent injection
+    const allowedSortCols = ['email', 'firstName', 'lastName', 'company', 'createdAt', 'updatedAt', 'verificationStatus', 'verificationScore'];
+    const sortCol = allowedSortCols.includes(params.sortBy) ? params.sortBy : 'createdAt';
+    const sortDir = params.sortOrder === 'ASC' ? 'ASC' : 'DESC';
+    sql += ` ORDER BY ${sortCol} ${sortDir} LIMIT ? OFFSET ?`;
+    queryParams.push(limit, offset);
 
-    const result = this.db.exec(query, params);
-    return result[0]?.values[0]?.[0] || 0;
+    const countResult = this._get(countSql, countParams);
+    const contacts = this._all(sql, queryParams);
+
+    return {
+      contacts,
+      total: countResult ? countResult.total : 0,
+      page,
+      limit,
+      totalPages: Math.ceil((countResult ? countResult.total : 0) / limit)
+    };
   }
 
-  // Get contacts for campaign sending (with tag support)
-  getContactsForCampaign(filter = {}) {
-    let query = `SELECT c.* FROM contacts c WHERE c.status = 'active'`;
-    const params = [];
+  getContactStats() {
+    const total = this._get('SELECT COUNT(*) as count FROM contacts');
+    const verified = this._get("SELECT COUNT(*) as count FROM contacts WHERE verificationStatus = 'valid'");
+    const unverified = this._get("SELECT COUNT(*) as count FROM contacts WHERE verificationStatus = 'unverified' OR verificationStatus IS NULL");
+    const invalid = this._get("SELECT COUNT(*) as count FROM contacts WHERE verificationStatus = 'invalid'");
+    const risky = this._get("SELECT COUNT(*) as count FROM contacts WHERE verificationStatus = 'risky'");
+    const active = this._get("SELECT COUNT(*) as count FROM contacts WHERE status = 'active'");
 
-    if (filter.listId) { 
-      query += ` AND c.listId = ?`; 
-      params.push(filter.listId); 
-    }
-    
-    // Tag filtering
-    if (filter.tags && filter.tags.length > 0) {
-      for (const tagId of filter.tags) {
-        query += ` AND c.tags LIKE ?`;
-        params.push(`%"${tagId}"%`);
-      }
-    }
+    return {
+      total: total?.count || 0,
+      verified: verified?.count || 0,
+      unverified: unverified?.count || 0,
+      invalid: invalid?.count || 0,
+      risky: risky?.count || 0,
+      active: active?.count || 0
+    };
+  }
 
-    // Exclude problematic contacts
-    query += ` AND c.bounceCount < 2`;
-    query += ` AND c.email NOT IN (SELECT email FROM blacklist WHERE email IS NOT NULL)`;
-    query += ` AND c.email NOT IN (SELECT email FROM unsubscribes WHERE email IS NOT NULL)`;
-
-    query += ` ORDER BY c.createdAt DESC`;
-
-    const result = this.db.exec(query, params);
-    return this.resultToObjects(result);
+  // Validate email format
+  _isValidEmail(email) {
+    if (!email || typeof email !== 'string') return false;
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+    return emailRegex.test(email.trim());
   }
 
   addContact(contact) {
-    const id = uuidv4();
-    try {
-      this.db.run(`
-        INSERT INTO contacts (id, email, firstName, lastName, company, phone, customField1, customField2, listId, tags, status, isDisposable, isRoleBased)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [id, contact.email, contact.firstName || null, contact.lastName || null,
-          contact.company || null, contact.phone || null, contact.customField1 || null,
-          contact.customField2 || null, contact.listId || null,
-          JSON.stringify(contact.tags || []), contact.status || 'active',
-          contact.isDisposable ? 1 : 0, contact.isRoleBased ? 1 : 0]);
-      this.save();
-      return { success: true, id };
-    } catch (error) {
-      if (error.message.includes('UNIQUE constraint failed')) {
-        return { success: false, error: 'Email already exists' };
-      }
-      return { success: false, error: error.message };
+    const email = (contact.email || '').trim().toLowerCase();
+    if (!this._isValidEmail(email)) {
+      return { error: 'Invalid email format', email: contact.email };
     }
+    const id = contact.id || uuidv4();
+    const tags = Array.isArray(contact.tags) ? JSON.stringify(contact.tags) : (contact.tags || '[]');
+    const verificationStatus = contact.verificationStatus || (contact.verified ? 'valid' : 'unverified');
+    const verificationScore = contact.verificationScore || 0;
+    const verificationDetails = contact.verificationDetails ? JSON.stringify(contact.verificationDetails) : '{}';
+    this._run(
+      `INSERT OR IGNORE INTO contacts (id, email, firstName, lastName, company, phone, customField1, customField2, tags, listId, status, verificationStatus, verificationScore, verificationDetails)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, email, contact.firstName || '', contact.lastName || '', contact.company || '',
+       contact.phone || '', contact.customField1 || '', contact.customField2 || '', tags, contact.listId || '',
+       contact.status || 'active', verificationStatus, verificationScore, verificationDetails]
+    );
+    return id;
   }
 
   addBulkContacts(contacts) {
-    let inserted = 0, skipped = 0;
+    let added = 0;
+    let skipped = 0;
+    let duplicates = 0;
+    let invalid = 0;
+    const seen = new Set();
+
+    // Wrap in transaction for atomicity and performance
+    this.db.run('BEGIN TRANSACTION');
+    try {
     for (const contact of contacts) {
-      if (this.isBlacklisted(contact.email)) { skipped++; continue; }
       try {
-        this.db.run(`
-          INSERT OR IGNORE INTO contacts (id, email, firstName, lastName, company, phone, customField1, customField2, listId, tags, status, isDisposable, isRoleBased)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `, [uuidv4(), contact.email, contact.firstName || null, contact.lastName || null,
-            contact.company || null, contact.phone || null, contact.customField1 || null,
-            contact.customField2 || null, contact.listId || null,
-            JSON.stringify(contact.tags || []), contact.status || 'active',
-            contact.isDisposable ? 1 : 0, contact.isRoleBased ? 1 : 0]);
-        if (this.db.getRowsModified() > 0) inserted++; else skipped++;
-      } catch (e) { skipped++; }
+        const email = (contact.email || '').trim().toLowerCase();
+
+        // Validate format
+        if (!this._isValidEmail(email)) {
+          invalid++;
+          skipped++;
+          continue;
+        }
+
+        // Check in-batch duplicates
+        if (seen.has(email)) {
+          duplicates++;
+          skipped++;
+          continue;
+        }
+        seen.add(email);
+
+        // Check existing in DB
+        const existing = this._get('SELECT id FROM contacts WHERE email = ?', [email]);
+        if (existing) {
+          duplicates++;
+          skipped++;
+          continue;
+        }
+
+        this.addContact(contact); // _save() is called once after COMMIT below
+        added++;
+      } catch (e) {
+        skipped++;
+      }
     }
-    this.save();
-    return { success: true, inserted, skipped };
+    this.db.run('COMMIT');
+    } catch (e) {
+      try { this.db.run('ROLLBACK'); } catch (re) {}
+      throw e;
+    }
+    // Save once after bulk
+    this._save();
+    return { added, inserted: added, skipped, duplicates, invalid, total: contacts.length };
   }
 
   updateContact(contact) {
-    this.db.run(`
-      UPDATE contacts 
-      SET email = ?, firstName = ?, lastName = ?, company = ?, phone = ?,
-          customField1 = ?, customField2 = ?, listId = ?, tags = ?, status = ?, 
-          verified = ?, verificationScore = ?, verificationMethod = ?, verificationDetails = ?,
-          isDisposable = ?, isRoleBased = ?, isCatchAll = ?, updatedAt = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `, [contact.email, contact.firstName, contact.lastName, contact.company, contact.phone,
-        contact.customField1, contact.customField2, contact.listId,
-        JSON.stringify(contact.tags || []), contact.status,
-        contact.verified ? 1 : 0, contact.verificationScore || 0,
-        contact.verificationMethod || null, contact.verificationDetails || null,
-        contact.isDisposable ? 1 : 0, contact.isRoleBased ? 1 : 0, contact.isCatchAll ? 1 : 0,
-        contact.id]);
-    this.save();
-    return { success: true };
-  }
-
-  // Update contact verification result
-  updateContactVerification(contactId, verificationResult) {
-    this.db.run(`
-      UPDATE contacts 
-      SET verified = ?, verificationScore = ?, verificationMethod = ?, verificationDetails = ?,
-          isDisposable = ?, isRoleBased = ?, isCatchAll = ?, updatedAt = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `, [
-      verificationResult.status === 'valid' ? 1 : 0,
-      verificationResult.score || 0,
-      verificationResult.details?.method || 'unknown',
-      JSON.stringify(verificationResult),
-      verificationResult.details?.isDisposable ? 1 : 0,
-      verificationResult.details?.isRoleBased ? 1 : 0,
-      verificationResult.details?.isCatchAll ? 1 : 0,
-      contactId
-    ]);
-    this.save();
-  }
-
-  // Increment bounce count for a contact
-  incrementContactBounce(contactId, reason) {
-    this.db.run(`
-      UPDATE contacts 
-      SET bounceCount = bounceCount + 1, lastBounceReason = ?, lastBounceAt = CURRENT_TIMESTAMP, updatedAt = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `, [reason, contactId]);
-    this.save();
-  }
-
-  updateContactEngagement(contactId, type) {
-    const field = type === 'open' ? 'totalOpens' : 'totalClicks';
-    const dateField = type === 'open' ? 'lastOpenedAt' : 'lastClickedAt';
-    const scoreIncrease = type === 'open' ? 10 : 20;
-    this.db.run(`UPDATE contacts SET ${field} = ${field} + 1, ${dateField} = CURRENT_TIMESTAMP, engagementScore = engagementScore + ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`, [scoreIncrease, contactId]);
-    this.save();
+    const tags = Array.isArray(contact.tags) ? JSON.stringify(contact.tags) : (contact.tags || '[]');
+    this._run(
+      `UPDATE contacts SET firstName=?, lastName=?, company=?, phone=?, customField1=?, customField2=?,
+       tags=?, listId=?, verificationStatus=?, verificationScore=?, verificationDetails=?,
+       updatedAt=datetime('now') WHERE id=?`,
+      [contact.firstName || '', contact.lastName || '', contact.company || '', contact.phone || '',
+       contact.customField1 || '', contact.customField2 || '', tags, contact.listId || '',
+       contact.verificationStatus || 'unverified', contact.verificationScore || 0,
+       JSON.stringify(contact.verificationDetails || {}), contact.id]
+    );
   }
 
   deleteContacts(ids) {
+    if (!Array.isArray(ids) || ids.length === 0) return;
     const placeholders = ids.map(() => '?').join(',');
-    this.db.run(`DELETE FROM contacts WHERE id IN (${placeholders})`, ids);
-    this.save();
-    return { success: true, deleted: ids.length };
+    this._run(`DELETE FROM contacts WHERE id IN (${placeholders})`, ids);
   }
 
   deleteContactsByVerification(status) {
-    let condition = status === 'invalid' ? 'verified = 0 AND verificationScore < 40' : 'verified = 0 AND verificationScore >= 40 AND verificationScore < 70';
-    const result = this.db.exec(`SELECT COUNT(*) as count FROM contacts WHERE ${condition}`);
-    const count = result.length > 0 ? result[0].values[0][0] : 0;
-    this.db.run(`DELETE FROM contacts WHERE ${condition}`);
-    this.save();
-    return { success: true, deleted: count };
+    this._run('DELETE FROM contacts WHERE verificationStatus = ?', [status]);
   }
 
-  // Delete bounced contacts
-  deleteBouncedContacts(minBounceCount = 2) {
-    const result = this.db.exec(`SELECT COUNT(*) as count FROM contacts WHERE bounceCount >= ?`, [minBounceCount]);
-    const count = result.length > 0 ? result[0].values[0][0] : 0;
-    this.db.run(`DELETE FROM contacts WHERE bounceCount >= ?`, [minBounceCount]);
-    this.save();
-    return { success: true, deleted: count };
+  getRecipientCount(filter) {
+    const manualEmails = Array.isArray(filter?.emails)
+      ? filter.emails.filter(Boolean)
+      : [];
+    if (manualEmails.length > 0) {
+      return [...new Set(manualEmails.map((email) => String(email).trim().toLowerCase()).filter(Boolean))].length;
+    }
+
+    let sql = 'SELECT COUNT(*) as count FROM contacts WHERE 1=1';
+    const params = [];
+
+    if (filter.listId) {
+      sql += ' AND listId = ?';
+      params.push(filter.listId);
+    }
+    // Support both legacy `filter.tag` and current `filter.tags` array.
+    const rawTags = filter?.tags ?? filter?.tag;
+    let tagsToMatch = [];
+    if (Array.isArray(rawTags)) {
+      tagsToMatch = rawTags;
+    } else if (typeof rawTags === 'string' && rawTags.trim()) {
+      try {
+        const parsed = JSON.parse(rawTags);
+        tagsToMatch = Array.isArray(parsed) ? parsed : [rawTags];
+      } catch {
+        tagsToMatch = [rawTags];
+      }
+    }
+    for (const t of tagsToMatch) {
+      if (!t) continue;
+      sql += ' AND tags LIKE ?';
+      params.push(`%${t}%`);
+    }
+    if (filter.verificationStatus) {
+      sql += ' AND verificationStatus = ?';
+      params.push(filter.verificationStatus);
+    }
+
+    const result = this._get(sql, params);
+    return result?.count || 0;
   }
 
-  // Get bounced contacts
-  getBouncedContacts() {
-    const result = this.db.exec(`SELECT * FROM contacts WHERE bounceCount > 0 ORDER BY bounceCount DESC, lastBounceAt DESC`);
-    return this.resultToObjects(result);
+  getContactsForCampaign(filter) {
+    const manualEmails = Array.isArray(filter?.emails)
+      ? [...new Set(filter.emails.map((email) => String(email).trim().toLowerCase()).filter(Boolean))]
+      : [];
+    if (manualEmails.length > 0) {
+      const placeholders = manualEmails.map(() => '?').join(',');
+      return this._all(`SELECT * FROM contacts WHERE lower(email) IN (${placeholders})`, manualEmails);
+    }
+
+    let sql = 'SELECT * FROM contacts WHERE 1=1';
+    const params = [];
+
+    if (filter.listId) {
+      sql += ' AND listId = ?';
+      params.push(filter.listId);
+    }
+    // Support both legacy `filter.tag` and current `filter.tags` array.
+    const rawTags = filter?.tags ?? filter?.tag;
+    let tagsToMatch = [];
+    if (Array.isArray(rawTags)) {
+      tagsToMatch = rawTags;
+    } else if (typeof rawTags === 'string' && rawTags.trim()) {
+      try {
+        const parsed = JSON.parse(rawTags);
+        tagsToMatch = Array.isArray(parsed) ? parsed : [rawTags];
+      } catch {
+        tagsToMatch = [rawTags];
+      }
+    }
+    for (const t of tagsToMatch) {
+      if (!t) continue;
+      sql += ' AND tags LIKE ?';
+      params.push(`%${t}%`);
+    }
+    if (filter.verificationStatus) {
+      if (filter.verificationStatus === 'verified_only') {
+        sql += " AND verificationStatus = 'valid'";
+      } else if (filter.verificationStatus === 'exclude_invalid') {
+        sql += " AND verificationStatus != 'invalid'";
+      }
+    }
+
+    return this._all(sql, params);
   }
 
-  getContactsByList(listId) {
-    if (listId === 'all' || !listId) return this.getAllContacts();
-    const result = this.db.exec(`SELECT c.*, l.name as listName FROM contacts c LEFT JOIN lists l ON c.listId = l.id WHERE c.listId = ? ORDER BY c.createdAt DESC`, [listId]);
-    return this.resultToObjects(result);
+  incrementContactBounce(contactId, reason) {
+    this._run(
+      `UPDATE contacts SET bounceCount = bounceCount + 1, lastBounceReason = ?, updatedAt = datetime('now') WHERE id = ?`,
+      [reason || '', contactId]
+    );
   }
 
-  // ==================== TAGS ====================
-  getAllTags() {
-    const result = this.db.exec('SELECT * FROM tags ORDER BY name');
-    return this.resultToObjects(result);
-  }
-
-  addTag(tag) {
-    const id = uuidv4();
-    try {
-      this.db.run(`INSERT INTO tags (id, name, color) VALUES (?, ?, ?)`, [id, tag.name, tag.color || '#5bb4d4']);
-      this.save();
-      return { success: true, id };
-    } catch (e) { return { success: false, error: 'Tag already exists' }; }
-  }
-
-  deleteTag(id) {
-    this.db.run('DELETE FROM tags WHERE id = ?', [id]);
-    this.save();
-    return { success: true };
-  }
-
-  // ==================== LISTS ====================
+  // =================== LISTS ===================
   getAllLists() {
-    const result = this.db.exec(`SELECT l.*, COUNT(c.id) as contactCount FROM lists l LEFT JOIN contacts c ON l.id = c.listId GROUP BY l.id ORDER BY l.createdAt DESC`);
-    return this.resultToObjects(result);
+    return this._all('SELECT * FROM lists ORDER BY createdAt DESC');
   }
 
   addList(list) {
-    const id = uuidv4();
-    this.db.run(`INSERT INTO lists (id, name, description) VALUES (?, ?, ?)`, [id, list.name, list.description || null]);
-    this.save();
-    return { success: true, id };
+    const id = list.id || uuidv4();
+    this._run('INSERT INTO lists (id, name, description, color) VALUES (?, ?, ?, ?)',
+      [id, list.name, list.description || '', list.color || '#6366f1']);
+    return id;
   }
 
   updateList(list) {
-    this.db.run(`UPDATE lists SET name = ?, description = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`, [list.name, list.description, list.id]);
-    this.save();
-    return { success: true };
+    this._run('UPDATE lists SET name=?, description=?, color=? WHERE id=?',
+      [list.name, list.description || '', list.color || '#6366f1', list.id]);
   }
 
   deleteList(id) {
-    this.db.run('UPDATE contacts SET listId = NULL WHERE listId = ?', [id]);
-    this.db.run('DELETE FROM lists WHERE id = ?', [id]);
-    this.save();
-    return { success: true };
+    this._run('DELETE FROM lists WHERE id = ?', [id]);
+    // Clear listId from contacts that used this list
+    this._run("UPDATE contacts SET listId = '' WHERE listId = ?", [id]);
   }
 
-  // ==================== BLACKLIST ====================
+  getListContacts(listId) {
+    return this._all('SELECT * FROM contacts WHERE listId = ?', [listId]);
+  }
+
+  // =================== TAGS ===================
+  getAllTags() {
+    return this._all('SELECT * FROM tags ORDER BY name ASC');
+  }
+
+  addTag(tag) {
+    const id = tag.id || uuidv4();
+    try {
+      this._run('INSERT INTO tags (id, name, color) VALUES (?, ?, ?)',
+        [id, tag.name, tag.color || '#6366f1']);
+    } catch (e) {
+      // Duplicate tag name - ignore
+    }
+    return id;
+  }
+
+  deleteTag(id) {
+    this._run('DELETE FROM tags WHERE id = ?', [id]);
+  }
+
+  // =================== BLACKLIST ===================
   getAllBlacklist() {
-    const result = this.db.exec('SELECT * FROM blacklist ORDER BY createdAt DESC');
-    return this.resultToObjects(result);
+    return this._all('SELECT * FROM blacklist ORDER BY createdAt DESC').map((entry) => {
+      const storedValue = (entry.email || '').toLowerCase();
+      if (storedValue.startsWith('@') && storedValue.length > 1) {
+        return {
+          ...entry,
+          email: '',
+          domain: storedValue.slice(1)
+        };
+      }
+
+      return {
+        ...entry,
+        domain: ''
+      };
+    });
   }
 
   addToBlacklist(entry) {
-    const id = uuidv4();
+    const id = entry.id || uuidv4();
+    const normalizedEmail = String(entry.email || '').trim().toLowerCase();
+    const normalizedDomain = String(entry.domain || '').trim().toLowerCase();
+    const address = normalizedEmail || (normalizedDomain ? `@${normalizedDomain}` : '');
+    if (!address) return id;
+
     try {
-      if (entry.email) {
-        this.db.run(`INSERT OR IGNORE INTO blacklist (id, email, reason, source, bounceType, smtpCode) VALUES (?, ?, ?, ?, ?, ?)`, 
-          [id, entry.email.toLowerCase(), entry.reason || null, entry.source || 'manual', entry.bounceType || null, entry.smtpCode || null]);
-      } else if (entry.domain) {
-        this.db.run(`INSERT OR IGNORE INTO blacklist (id, domain, reason, source) VALUES (?, ?, ?, ?)`, 
-          [id, entry.domain.toLowerCase(), entry.reason || null, entry.source || 'manual']);
-      }
-      this.save();
-      return { success: true };
-    } catch (e) { return { success: false, error: e.message }; }
+      this._run('INSERT OR IGNORE INTO blacklist (id, email, reason, source) VALUES (?, ?, ?, ?)',
+        [id, address, entry.reason || '', entry.source || 'manual']);
+    } catch (e) {
+      // Duplicate - ignore
+    }
+    return id;
   }
 
-  addBulkToBlacklist(entries, source = 'import') {
+  addBulkToBlacklist(entries) {
     let added = 0;
-    for (const entry of entries) {
-      try {
-        this.db.run(`INSERT OR IGNORE INTO blacklist (id, email, reason, source) VALUES (?, ?, ?, ?)`, 
-          [uuidv4(), (entry.email || entry).toLowerCase(), 'Bulk import', source]);
-        if (this.db.getRowsModified() > 0) added++;
-      } catch (e) {}
+    this.db.run('BEGIN TRANSACTION');
+    try {
+      for (const entry of entries) {
+        try {
+          const normalizedEmail = String(entry.email || '').trim().toLowerCase();
+          const normalizedDomain = String(entry.domain || '').trim().toLowerCase();
+          const address = normalizedEmail || (normalizedDomain ? `@${normalizedDomain}` : '');
+          if (!address) continue;
+
+          const existing = this._get('SELECT id FROM blacklist WHERE email = ?', [address]);
+          if (!existing) {
+            this.addToBlacklist(entry);
+            added++;
+          }
+        } catch (e) {
+          // ignore duplicate entry
+        }
+      }
+      this.db.run('COMMIT');
+    } catch (e) {
+      try { this.db.run('ROLLBACK'); } catch (re) {}
     }
-    this.save();
-    return { success: true, added };
+    this._save();
+    return { added, total: entries.length };
   }
 
   removeFromBlacklist(id) {
-    this.db.run('DELETE FROM blacklist WHERE id = ?', [id]);
-    this.save();
-    return { success: true };
+    this._run('DELETE FROM blacklist WHERE id = ?', [id]);
   }
 
   isBlacklisted(email) {
-    if (!email) return false;
-    const emailLower = email.toLowerCase();
-    const domain = emailLower.split('@')[1];
-    const result = this.db.exec(`SELECT COUNT(*) as count FROM blacklist WHERE email = ? OR domain = ?`, [emailLower, domain]);
-    return result.length > 0 && result[0].values[0][0] > 0;
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    if (!normalizedEmail) return false;
+
+    const domain = normalizedEmail.includes('@') ? `@${normalizedEmail.split('@')[1]}` : '';
+    const result = domain
+      ? this._get('SELECT id FROM blacklist WHERE email = ? OR email = ?', [normalizedEmail, domain])
+      : this._get('SELECT id FROM blacklist WHERE email = ?', [normalizedEmail]);
+    return !!result;
   }
 
-  // ==================== UNSUBSCRIBES ====================
+  // Auto-blacklist contacts that hard bounced 2+ times
+  autoBlacklistBounced() {
+    const bounced = this._all('SELECT * FROM contacts WHERE bounceCount >= 2');
+    let count = 0;
+    for (const contact of bounced) {
+      if (!this.isBlacklisted(contact.email)) {
+        this.addToBlacklist({
+          email: contact.email,
+          reason: `Auto-blacklisted: ${contact.bounceCount} bounces - ${contact.lastBounceReason}`,
+          source: 'auto_bounce'
+        });
+        count++;
+      }
+    }
+    return { blacklisted: count };
+  }
+
+  // =================== UNSUBSCRIBES ===================
   getAllUnsubscribes() {
-    const result = this.db.exec('SELECT * FROM unsubscribes ORDER BY unsubscribedAt DESC');
-    return this.resultToObjects(result);
+    return this._all('SELECT * FROM unsubscribes ORDER BY createdAt DESC');
   }
 
-  addUnsubscribe(email, campaignId = null, reason = null) {
+  addUnsubscribe(email, campaignId, reason) {
+    const id = uuidv4();
     try {
-      this.db.run(`INSERT OR IGNORE INTO unsubscribes (id, email, campaignId, reason) VALUES (?, ?, ?, ?)`, 
-        [uuidv4(), email.toLowerCase(), campaignId, reason]);
-      this.addToBlacklist({ email, reason: 'Unsubscribed', source: 'unsubscribe' });
-      this.save();
-      return { success: true };
-    } catch (e) { return { success: false, error: e.message }; }
-  }
-
-  isUnsubscribed(email) {
-    const result = this.db.exec('SELECT COUNT(*) as count FROM unsubscribes WHERE email = ?', [email.toLowerCase()]);
-    return result.length > 0 && result[0].values[0][0] > 0;
+      this._run('INSERT OR IGNORE INTO unsubscribes (id, email, campaignId, reason) VALUES (?, ?, ?, ?)',
+        [id, email.toLowerCase(), campaignId || '', reason || '']);
+    } catch (e) {
+      // ignore duplicate or error
+    }
   }
 
   removeUnsubscribe(email) {
-    try {
-      this.db.run('DELETE FROM unsubscribes WHERE email = ?', [email.toLowerCase()]);
-      this.save();
-      return { success: true };
-    } catch (e) { return { success: false, error: e.message }; }
+    this._run('DELETE FROM unsubscribes WHERE email = ?', [email.toLowerCase()]);
   }
 
-  // ==================== TEMPLATES ====================
+  isUnsubscribed(email) {
+    const result = this._get('SELECT id FROM unsubscribes WHERE email = ?', [email.toLowerCase()]);
+    return !!result;
+  }
+
+  // =================== TEMPLATES ===================
   getAllTemplates() {
-    const result = this.db.exec('SELECT * FROM templates ORDER BY createdAt DESC');
-    return this.resultToObjects(result);
+    return this._all('SELECT * FROM templates ORDER BY updatedAt DESC');
   }
 
   getTemplatesByCategory(category) {
-    const result = this.db.exec('SELECT * FROM templates WHERE category = ? ORDER BY createdAt DESC', [category]);
-    return this.resultToObjects(result);
+    return this._all('SELECT * FROM templates WHERE category = ? ORDER BY updatedAt DESC', [category]);
+  }
+
+  getTemplateWithBlocks(templateId) {
+    return this._get('SELECT * FROM templates WHERE id = ?', [templateId]);
+  }
+
+  saveTemplateBlocks(data) {
+    this._run("UPDATE templates SET blocks = ?, updatedAt = datetime('now') WHERE id = ?",
+      [JSON.stringify(data.blocks || []), data.templateId]);
+  }
+
+  getTemplateCategories() {
+    const results = this._all('SELECT DISTINCT category FROM templates ORDER BY category ASC');
+    return results.map(r => r.category).filter(Boolean);
   }
 
   addTemplate(template) {
-    const id = uuidv4();
-    this.db.run(`INSERT INTO templates (id, name, subject, content, category) VALUES (?, ?, ?, ?, ?)`, 
-      [id, template.name, template.subject, template.content, template.category || 'general']);
-    this.save();
-    return { success: true, id };
+    const id = template.id || uuidv4();
+    this._run(
+      'INSERT INTO templates (id, name, subject, content, category, blocks) VALUES (?, ?, ?, ?, ?, ?)',
+      [id, template.name, template.subject || '', template.content || '',
+       template.category || 'general', JSON.stringify(template.blocks || [])]
+    );
+    return id;
   }
 
   updateTemplate(template) {
-    this.db.run(`UPDATE templates SET name = ?, subject = ?, content = ?, category = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`, 
-      [template.name, template.subject, template.content, template.category || 'general', template.id]);
-    this.save();
-    return { success: true };
+    this._run(
+      "UPDATE templates SET name=?, subject=?, content=?, category=?, blocks=?, updatedAt=datetime('now') WHERE id=?",
+      [template.name, template.subject || '', template.content || '',
+       template.category || 'general', JSON.stringify(template.blocks || []), template.id]
+    );
   }
 
   deleteTemplate(id) {
-    this.db.run('DELETE FROM templates WHERE id = ?', [id]);
-    this.save();
-    return { success: true };
+    this._run('DELETE FROM templates WHERE id = ?', [id]);
   }
 
-  // ==================== SMTP ACCOUNTS ====================
+  // =================== SMTP ACCOUNTS ===================
   getAllSmtpAccounts() {
-    const result = this.db.exec('SELECT * FROM smtp_accounts ORDER BY priority, createdAt');
-    return this.resultToObjects(result);
+    return this._all('SELECT * FROM smtp_accounts ORDER BY isDefault DESC, createdAt DESC');
   }
 
   getActiveSmtpAccounts() {
-    const today = new Date().toISOString().split('T')[0];
-    this.db.run(`UPDATE smtp_accounts SET sentToday = 0, lastResetDate = ? WHERE lastResetDate != ? OR lastResetDate IS NULL`, [today, today]);
-    const result = this.db.exec(`SELECT * FROM smtp_accounts WHERE isActive = 1 AND sentToday < dailyLimit ORDER BY priority, sentToday`);
-    return this.resultToObjects(result);
+    // Reset daily counts if the date has changed
+    this._resetDailyCounts();
+    return this._all('SELECT * FROM smtp_accounts WHERE isActive = 1 ORDER BY isDefault DESC, createdAt DESC');
+  }
+
+  getPrimarySmtpAccount(activeOnly = false) {
+    const filter = activeOnly ? 'WHERE isActive = 1' : '';
+    return this._get(`SELECT * FROM smtp_accounts ${filter} ORDER BY isDefault DESC, createdAt DESC LIMIT 1`);
+  }
+
+  _ensureDefaultSmtpAccount(preferredId = '') {
+    const accounts = this._all('SELECT id, isDefault FROM smtp_accounts ORDER BY createdAt DESC');
+    if (accounts.length === 0) return null;
+
+    let selectedId = preferredId && accounts.some((account) => account.id === preferredId)
+      ? preferredId
+      : null;
+
+    if (!selectedId) {
+      selectedId = accounts.find((account) => !!account.isDefault)?.id || accounts[0].id;
+    }
+
+    this.db.run(
+      'UPDATE smtp_accounts SET isDefault = CASE WHEN id = ? THEN 1 ELSE 0 END',
+      [selectedId]
+    );
+
+    return selectedId;
   }
 
   addSmtpAccount(account) {
-    const id = uuidv4();
-    this.db.run(`INSERT INTO smtp_accounts (id, name, host, port, secure, username, password, fromName, fromEmail, replyTo, dailyLimit, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, account.name, account.host, account.port || 587, account.secure ? 1 : 0, account.username, account.password, account.fromName, account.fromEmail, account.replyTo, account.dailyLimit || 500, account.priority || 1]);
-    this.save();
-    return { success: true, id };
+    const id = account.id || uuidv4();
+    this.db.run(
+      `INSERT INTO smtp_accounts (id, name, host, port, secure, username, password, fromName, fromEmail, replyTo,
+        dailyLimit, isActive, isDefault, warmUpEnabled, warmUpStartDate, warmUpSchedule, rejectUnauthorized, unsubscribeEmail,
+        dkimDomain, dkimSelector, dkimPrivateKey)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, account.name || '', account.host, account.port || 587, account.secure ? 1 : 0,
+       account.username, account.password, account.fromName || '', account.fromEmail || '',
+       account.replyTo || '', account.dailyLimit || 500, account.isActive !== false ? 1 : 0, account.isDefault ? 1 : 0,
+       account.warmUpEnabled ? 1 : 0, account.warmUpStartDate || '',
+       JSON.stringify(account.warmUpSchedule || {}), account.rejectUnauthorized !== false ? 1 : 0,
+       account.unsubscribeEmail || '', account.dkimDomain || '', account.dkimSelector || '',
+       account.dkimPrivateKey || '']
+    );
+    this._ensureDefaultSmtpAccount(account.isDefault ? id : '');
+    this._saveDebounced();
+    return id;
   }
 
   updateSmtpAccount(account) {
-    this.db.run(`UPDATE smtp_accounts SET name = ?, host = ?, port = ?, secure = ?, username = ?, password = ?, fromName = ?, fromEmail = ?, replyTo = ?, dailyLimit = ?, isActive = ?, priority = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`,
-      [account.name, account.host, account.port, account.secure ? 1 : 0, account.username, account.password, account.fromName, account.fromEmail, account.replyTo, account.dailyLimit, account.isActive ? 1 : 0, account.priority, account.id]);
-    this.save();
-    return { success: true };
-  }
-
-  incrementSmtpSentCount(accountId) {
-    this.db.run(`UPDATE smtp_accounts SET sentToday = sentToday + 1 WHERE id = ?`, [accountId]);
-    this.save();
+    this.db.run(
+      `UPDATE smtp_accounts SET name=?, host=?, port=?, secure=?, username=?, password=?, fromName=?, fromEmail=?,
+       replyTo=?, dailyLimit=?, isActive=?, isDefault=?, warmUpEnabled=?, warmUpStartDate=?, warmUpSchedule=?,
+       rejectUnauthorized=?, unsubscribeEmail=?, dkimDomain=?, dkimSelector=?, dkimPrivateKey=?,
+       updatedAt=datetime('now') WHERE id=?`,
+      [account.name || '', account.host, account.port || 587, account.secure ? 1 : 0,
+       account.username, account.password, account.fromName || '', account.fromEmail || '',
+       account.replyTo || '', account.dailyLimit || 500, account.isActive !== false ? 1 : 0, account.isDefault ? 1 : 0,
+       account.warmUpEnabled ? 1 : 0, account.warmUpStartDate || '',
+       JSON.stringify(account.warmUpSchedule || {}), account.rejectUnauthorized !== false ? 1 : 0,
+       account.unsubscribeEmail || '', account.dkimDomain || '', account.dkimSelector || '',
+       account.dkimPrivateKey || '', account.id]
+    );
+    this._ensureDefaultSmtpAccount(account.isDefault ? account.id : '');
+    this._saveDebounced();
   }
 
   deleteSmtpAccount(id) {
+    const target = this._get('SELECT id, isDefault FROM smtp_accounts WHERE id = ?', [id]);
     this.db.run('DELETE FROM smtp_accounts WHERE id = ?', [id]);
-    this.save();
-    return { success: true };
+    if (target?.isDefault) {
+      this._ensureDefaultSmtpAccount();
+    }
+    this._saveDebounced();
   }
 
-  // Legacy SMTP settings
-  getSmtpSettings() {
-    const result = this.db.exec('SELECT * FROM smtp_settings WHERE id = 1');
-    const arr = this.resultToObjects(result);
-    return arr.length > 0 ? arr[0] : null;
+  incrementSmtpSentCount(accountId) {
+    this._run('UPDATE smtp_accounts SET sentToday = sentToday + 1 WHERE id = ?', [accountId]);
   }
 
-  saveSmtpSettings(settings) {
-    this.db.run(`UPDATE smtp_settings SET host = ?, port = ?, secure = ?, username = ?, password = ?, fromName = ?, fromEmail = ?, replyTo = ?, unsubscribeEmail = ?, unsubscribeUrl = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = 1`,
-      [settings.host, settings.port, settings.secure ? 1 : 0, settings.username, settings.password, settings.fromName, settings.fromEmail, settings.replyTo, settings.unsubscribeEmail, settings.unsubscribeUrl]);
-    this.save();
-    return { success: true };
+  _resetDailyCounts() {
+    const today = new Date().toISOString().split('T')[0];
+    // Cache the last reset date so we only run the UPDATE once per calendar day,
+    // instead of on every getActiveSmtpAccounts() call (which fires per-email).
+    if (this._lastResetDate === today) return;
+    this._lastResetDate = today;
+    this._run(
+      "UPDATE smtp_accounts SET sentToday = 0, lastResetDate = ? WHERE lastResetDate != ?",
+      [today, today]
+    );
   }
 
-  // ==================== SPAM REPLACEMENTS ====================
-  getAllSpamReplacements() {
-    const result = this.db.exec('SELECT * FROM spam_replacements WHERE isActive = 1 ORDER BY spamWord');
-    return this.resultToObjects(result);
-  }
-
-  addSpamReplacement(item) {
-    const id = uuidv4();
-    try {
-      this.db.run(`INSERT INTO spam_replacements (id, spamWord, replacement, category) VALUES (?, ?, ?, ?)`, 
-        [id, item.spamWord, item.replacement, item.category || 'general']);
-      this.save();
-      return { success: true, id };
-    } catch (e) { return { success: false, error: 'Word already exists' }; }
-  }
-
-  updateSpamReplacement(item) {
-    this.db.run(`UPDATE spam_replacements SET spamWord = ?, replacement = ?, category = ?, isActive = ? WHERE id = ?`, 
-      [item.spamWord, item.replacement, item.category, item.isActive ? 1 : 0, item.id]);
-    this.save();
-    return { success: true };
-  }
-
-  deleteSpamReplacement(id) {
-    this.db.run('DELETE FROM spam_replacements WHERE id = ?', [id]);
-    this.save();
-    return { success: true };
-  }
-
-  // ==================== CAMPAIGNS ====================
+  // =================== CAMPAIGNS ===================
   getAllCampaigns() {
-    const result = this.db.exec(`SELECT c.*, l.name as listName FROM campaigns c LEFT JOIN lists l ON c.listId = l.id ORDER BY c.createdAt DESC`);
-    return this.resultToObjects(result);
-  }
-
-  getCampaign(id) {
-    const result = this.db.exec(`SELECT c.*, l.name as listName FROM campaigns c LEFT JOIN lists l ON c.listId = l.id WHERE c.id = ?`, [id]);
-    const arr = this.resultToObjects(result);
-    return arr.length > 0 ? arr[0] : null;
+    // JOIN campaign_logs to compute live opened/clicked counts so the
+    // campaign list page always shows accurate rates without a separate
+    // getCampaignAnalytics() call per row.
+    return this._all(`
+      SELECT c.*,
+             l.name AS listName,
+             COALESCE(stats.openedEmails,  0) AS openedEmails,
+             COALESCE(stats.clickedEmails, 0) AS clickedEmails
+      FROM campaigns c
+      LEFT JOIN lists l ON c.listId = l.id
+      LEFT JOIN (
+        SELECT campaignId,
+               SUM(CASE WHEN openedAt IS NOT NULL AND openedAt != '' THEN 1 ELSE 0 END) AS openedEmails,
+               SUM(CASE WHEN clickedAt IS NOT NULL AND clickedAt != '' THEN 1 ELSE 0 END) AS clickedEmails
+        FROM campaign_logs
+        GROUP BY campaignId
+      ) stats ON stats.campaignId = c.id
+      ORDER BY c.createdAt DESC
+    `);
   }
 
   getScheduledCampaigns() {
-    const result = this.db.exec(`SELECT * FROM campaigns WHERE status = 'scheduled' ORDER BY scheduledAt`);
-    return this.resultToObjects(result);
+    return this._all(`SELECT c.*, l.name as listName FROM campaigns c LEFT JOIN lists l ON c.listId = l.id WHERE c.status = 'scheduled' AND c.scheduledAt != '' ORDER BY c.scheduledAt ASC`);
   }
 
   addCampaign(campaign) {
-    const id = uuidv4();
-    const selectedTags = campaign.selectedTags ? JSON.stringify(campaign.selectedTags) : null;
-    this.db.run(`INSERT INTO campaigns (id, name, subject, subjectB, content, contentB, isABTest, abTestPercent, listId, selectedTags, status, totalEmails, batchSize, delayMinutes, scheduledAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, campaign.name, campaign.subject, campaign.subjectB || null, campaign.content, campaign.contentB || null, campaign.isABTest ? 1 : 0, campaign.abTestPercent || 10, campaign.listId || null, selectedTags, campaign.status || 'draft', campaign.totalEmails || 0, campaign.batchSize || 50, campaign.delayMinutes || 10, campaign.scheduledAt || null]);
-    this.save();
-    return { success: true, id };
+    const id = campaign.id || uuidv4();
+    this._run(
+      `INSERT INTO campaigns (id, name, subject, content, subjectB, contentB, isABTest, abTestPercent,
+        status, listId, tagFilter, manualEmails, verificationFilter, smtpAccountId, batchSize, delayMinutes,
+        delayBetweenEmails, maxRetries, scheduledAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, campaign.name || '', campaign.subject || '', campaign.content || '',
+       campaign.subjectB || '', campaign.contentB || '', campaign.isABTest ? 1 : 0,
+       campaign.abTestPercent || 10, campaign.status || 'draft', campaign.listId || '',
+       campaign.tagFilter || '', campaign.manualEmails || '', campaign.verificationFilter || '', campaign.smtpAccountId || '',
+       campaign.batchSize || 50, campaign.delayMinutes || 10, campaign.delayBetweenEmails || 2000,
+       campaign.maxRetries || 3, campaign.scheduledAt || '']
+    );
+    return id;
   }
 
   updateCampaign(campaign) {
-    const selectedTags = campaign.selectedTags ? (typeof campaign.selectedTags === 'string' ? campaign.selectedTags : JSON.stringify(campaign.selectedTags)) : null;
-    this.db.run(`UPDATE campaigns SET name = ?, subject = ?, subjectB = ?, content = ?, contentB = ?, isABTest = ?, abTestPercent = ?, abWinner = ?, listId = ?, selectedTags = ?, status = ?, totalEmails = ?, sentEmails = ?, failedEmails = ?, openedEmails = ?, clickedEmails = ?, bouncedEmails = ?, softBouncedEmails = ?, batchSize = ?, delayMinutes = ?, scheduledAt = ?, startedAt = ?, completedAt = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`,
-      [campaign.name, campaign.subject, campaign.subjectB, campaign.content, campaign.contentB, campaign.isABTest ? 1 : 0, campaign.abTestPercent, campaign.abWinner, campaign.listId, selectedTags, campaign.status, campaign.totalEmails, campaign.sentEmails, campaign.failedEmails, campaign.openedEmails || 0, campaign.clickedEmails || 0, campaign.bouncedEmails || 0, campaign.softBouncedEmails || 0, campaign.batchSize, campaign.delayMinutes, campaign.scheduledAt, campaign.startedAt, campaign.completedAt, campaign.id]);
-    this.save();
-    return { success: true };
+    this._run(
+      `UPDATE campaigns SET name=?, subject=?, content=?, subjectB=?, contentB=?, isABTest=?,
+       abTestPercent=?, status=?, listId=?, tagFilter=?, manualEmails=?, verificationFilter=?, smtpAccountId=?,
+       batchSize=?, delayMinutes=?, delayBetweenEmails=?, maxRetries=?, totalEmails=?,
+       sentEmails=?, failedEmails=?, bouncedEmails=?, scheduledAt=?, startedAt=?, completedAt=?,
+       updatedAt=datetime('now') WHERE id=?`,
+      [campaign.name || '', campaign.subject || '', campaign.content || '',
+       campaign.subjectB || '', campaign.contentB || '', campaign.isABTest ? 1 : 0,
+       campaign.abTestPercent || 10, campaign.status || 'draft', campaign.listId || '',
+       campaign.tagFilter || '', campaign.manualEmails || '', campaign.verificationFilter || '', campaign.smtpAccountId || '',
+       campaign.batchSize || 50, campaign.delayMinutes || 10, campaign.delayBetweenEmails || 2000,
+       campaign.maxRetries || 3, campaign.totalEmails || 0, campaign.sentEmails || 0,
+       campaign.failedEmails || 0, campaign.bouncedEmails || 0, campaign.scheduledAt || '',
+       campaign.startedAt || '', campaign.completedAt || '', campaign.id]
+    );
   }
 
   deleteCampaign(id) {
-    this.db.run('DELETE FROM campaign_logs WHERE campaignId = ?', [id]);
-    this.db.run('DELETE FROM email_tracking WHERE campaignId = ?', [id]);
-    this.db.run('DELETE FROM campaigns WHERE id = ?', [id]);
-    this.save();
-    return { success: true };
+    this._run('DELETE FROM campaigns WHERE id = ?', [id]);
+    this._run('DELETE FROM campaign_logs WHERE campaignId = ?', [id]);
   }
 
-  scheduleCampaign(campaignId, scheduledAt) {
-    this.db.run(`UPDATE campaigns SET status = 'scheduled', scheduledAt = ? WHERE id = ?`, [scheduledAt, campaignId]);
-    this.save();
-    return { success: true };
-  }
-
-  cancelScheduledCampaign(campaignId) {
-    this.db.run(`UPDATE campaigns SET status = 'draft', scheduledAt = NULL WHERE id = ?`, [campaignId]);
-    this.save();
-    return { success: true };
-  }
-
-  // ==================== CAMPAIGN LOGS ====================
-  addCampaignLog(log) {
-    const id = uuidv4();
-    this.db.run(`INSERT INTO campaign_logs (id, campaignId, contactId, email, status, variant, smtpCode, smtpResponse, failureType, failureReason, trackingId, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, log.campaignId, log.contactId || null, log.email, log.status, log.variant || 'A', log.smtpCode || null, log.smtpResponse || null, log.failureType || null, log.failureReason || null, log.trackingId || null, log.error || null]);
-    this.save();
-    return { success: true, id };
-  }
-
+  // =================== CAMPAIGN LOGS ===================
   getCampaignLogs(campaignId) {
-    const result = this.db.exec(`SELECT * FROM campaign_logs WHERE campaignId = ? ORDER BY sentAt DESC`, [campaignId]);
-    return this.resultToObjects(result);
+    return this._all('SELECT * FROM campaign_logs WHERE campaignId = ? ORDER BY createdAt DESC', [campaignId]);
   }
 
-  // Get logs by status (for analytics)
-  getCampaignLogsByStatus(campaignId, status) {
-    const result = this.db.exec(`SELECT * FROM campaign_logs WHERE campaignId = ? AND status = ? ORDER BY sentAt DESC`, [campaignId, status]);
-    return this.resultToObjects(result);
+  addCampaignLog(log) {
+    const id = log.id || uuidv4();
+    this._run(
+      `INSERT INTO campaign_logs (id, campaignId, contactId, email, status, variant, smtpCode,
+        smtpResponse, failureType, failureReason, trackingId, error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, log.campaignId, log.contactId || '', log.email, log.status || 'pending',
+       log.variant || 'A', log.smtpCode || null, log.smtpResponse || '',
+       log.failureType || '', log.failureReason || '', log.trackingId || '', log.error || '']
+    );
   }
 
-  // Get bounced emails for a campaign
-  getCampaignBounces(campaignId) {
-    const result = this.db.exec(`SELECT * FROM campaign_logs WHERE campaignId = ? AND (status = 'bounced' OR status = 'soft_bounce' OR failureType LIKE '%bounce%') ORDER BY sentAt DESC`, [campaignId]);
-    return this.resultToObjects(result);
+  addCampaignLogBatch(logs) {
+    for (const log of logs) {
+      const id = log.id || uuidv4();
+      this._run(
+        `INSERT INTO campaign_logs (id, campaignId, contactId, email, status, variant, smtpCode,
+          smtpResponse, failureType, failureReason, trackingId, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, log.campaignId, log.contactId || '', log.email, log.status || 'pending',
+         log.variant || 'A', log.smtpCode || null, log.smtpResponse || '',
+         log.failureType || '', log.failureReason || '', log.trackingId || '', log.error || '']
+      );
+    }
+    // Single debounced save for all logs
+    this._saveDebounced();
   }
 
-  // Update log when email is opened/clicked
-  updateCampaignLogTracking(trackingId, type) {
-    const field = type === 'open' ? 'openedAt' : 'clickedAt';
-    this.db.run(`UPDATE campaign_logs SET ${field} = CURRENT_TIMESTAMP WHERE trackingId = ?`, [trackingId]);
-    this.save();
-  }
-
-  // Get campaign log by tracking ID
   getCampaignLogByTracking(campaignId, trackingId) {
-    const result = this.db.exec(`SELECT * FROM campaign_logs WHERE campaignId = ? AND trackingId = ?`, [campaignId, trackingId]);
-    const arr = this.resultToObjects(result);
-    return arr.length > 0 ? arr[0] : null;
+    return this._get('SELECT * FROM campaign_logs WHERE campaignId = ? AND trackingId = ?',
+      [campaignId, trackingId]);
   }
 
-  // Update log when email is opened
   updateCampaignLogOpened(campaignId, trackingId) {
-    this.db.run(`UPDATE campaign_logs SET openedAt = CURRENT_TIMESTAMP WHERE campaignId = ? AND trackingId = ? AND openedAt IS NULL`, [campaignId, trackingId]);
-    this.save();
+    this._run(
+      "UPDATE campaign_logs SET openedAt = datetime('now') WHERE campaignId = ? AND trackingId = ? AND (openedAt IS NULL OR openedAt = '')",
+      [campaignId, trackingId]
+    );
   }
 
-  // Update log when email is clicked
   updateCampaignLogClicked(campaignId, trackingId) {
-    this.db.run(`UPDATE campaign_logs SET clickedAt = CURRENT_TIMESTAMP WHERE campaignId = ? AND trackingId = ? AND clickedAt IS NULL`, [campaignId, trackingId]);
-    this.save();
+    this._run(
+      "UPDATE campaign_logs SET clickedAt = datetime('now') WHERE campaignId = ? AND trackingId = ? AND (clickedAt IS NULL OR clickedAt = '')",
+      [campaignId, trackingId]
+    );
   }
 
-  // ==================== EMAIL TRACKING ====================
-  addTrackingEvent(event) {
-    const id = uuidv4();
-    this.db.run(`INSERT INTO email_tracking (id, campaignId, contactId, email, type, link, userAgent, ipAddress) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, event.campaignId, event.contactId || null, event.email, event.type, event.link || null, event.userAgent || null, event.ipAddress || null]);
-    if (event.type === 'open') this.db.run(`UPDATE campaigns SET openedEmails = openedEmails + 1 WHERE id = ?`, [event.campaignId]);
-    else if (event.type === 'click') this.db.run(`UPDATE campaigns SET clickedEmails = clickedEmails + 1 WHERE id = ?`, [event.campaignId]);
-    if (event.contactId) this.updateContactEngagement(event.contactId, event.type);
-    if (event.trackingId) this.updateCampaignLogTracking(event.trackingId, event.type);
-    this.save();
-    return { success: true, id };
-  }
-
-  getTrackingEvents(campaignId) {
-    const result = this.db.exec(`SELECT * FROM email_tracking WHERE campaignId = ? ORDER BY createdAt DESC`, [campaignId]);
-    return this.resultToObjects(result);
-  }
-
-  // ==================== ANALYTICS ====================
   getCampaignAnalytics(campaignId) {
-    const campaign = this.db.exec(`SELECT * FROM campaigns WHERE id = ?`, [campaignId]);
-    const campaignData = this.resultToObjects(campaign)[0] || {};
-    
-    // Get status breakdown from logs
-    const statusBreakdown = this.db.exec(`
-      SELECT status, failureType, COUNT(*) as count 
-      FROM campaign_logs 
-      WHERE campaignId = ? 
-      GROUP BY status, failureType
-    `, [campaignId]);
-    
-    // Get bounce reasons
-    const bounceReasons = this.db.exec(`
-      SELECT failureReason, COUNT(*) as count 
-      FROM campaign_logs 
-      WHERE campaignId = ? AND (status = 'bounced' OR status = 'soft_bounce' OR status = 'failed')
-      GROUP BY failureReason 
-      ORDER BY count DESC 
-      LIMIT 10
-    `, [campaignId]);
-    
-    const opensByHour = this.db.exec(`
-      SELECT strftime('%H', createdAt) as hour, COUNT(*) as count 
-      FROM email_tracking 
-      WHERE campaignId = ? AND type = 'open' 
-      GROUP BY hour ORDER BY hour
-    `, [campaignId]);
-    
-    const clicksByLink = this.db.exec(`
-      SELECT link, COUNT(*) as count 
-      FROM email_tracking 
-      WHERE campaignId = ? AND type = 'click' AND link IS NOT NULL 
-      GROUP BY link ORDER BY count DESC LIMIT 10
-    `, [campaignId]);
+    const campaign = this._get('SELECT * FROM campaigns WHERE id = ?', [campaignId]);
+    if (!campaign) return null;
 
-    // Calculate real metrics
-    const sent = campaignData.sentEmails || 0;
-    const bounced = campaignData.bouncedEmails || 0;
-    const failed = campaignData.failedEmails || 0;
-    const opened = campaignData.openedEmails || 0;
-    const clicked = campaignData.clickedEmails || 0;
-    const delivered = sent - bounced;
+    const logs = this.getCampaignLogs(campaignId);
+    const events = this.getTrackingEvents(campaignId);
+
+    const sent = logs.filter(l => l.status === 'sent').length;
+    const failed = logs.filter(l => l.status === 'failed').length;
+    const bounced = logs.filter(l => l.status === 'bounced').length;
+    const softBounced = logs.filter(l => l.status === 'soft_bounce').length;
+    const opened = logs.filter(l => l.openedAt).length;
+    const clicked = logs.filter(l => l.clickedAt).length;
+
+    const openEvents = events.filter(e => e.type === 'open');
+    const clickEvents = events.filter(e => e.type === 'click');
+    const uniqueOpens = new Set(openEvents.map(e => e.contactId)).size;
+    const uniqueClicks = new Set(clickEvents.map(e => e.contactId)).size;
+
+    // A/B test results
+    const variantA = logs.filter(l => l.variant === 'A');
+    const variantB = logs.filter(l => l.variant === 'B');
+
+    // Opens by hour from tracking events
+    const opensByHourMap = {};
+    openEvents.forEach(e => {
+      const hour = new Date(e.createdAt).getHours().toString().padStart(2, '0');
+      opensByHourMap[hour] = (opensByHourMap[hour] || 0) + 1;
+    });
+    const opensByHour = Object.entries(opensByHourMap)
+      .map(([hour, count]) => ({ hour, count }))
+      .sort((a, b) => a.hour.localeCompare(b.hour));
+
+    // Clicks by link from tracking events
+    const clicksByLinkMap = {};
+    clickEvents.forEach(e => {
+      if (e.link) clicksByLinkMap[e.link] = (clicksByLinkMap[e.link] || 0) + 1;
+    });
+    const clicksByLink = Object.entries(clicksByLinkMap)
+      .map(([link, count]) => ({ link, count }))
+      .sort((a, b) => b.count - a.count);
+
+    // Enrich campaign record with computed tracking fields
+    const enrichedCampaign = {
+      ...campaign,
+      isABTest: !!campaign.isABTest,
+      sentEmails: campaign.sentEmails || sent,
+      totalEmails: campaign.totalEmails || logs.length,
+      failedEmails: campaign.failedEmails || failed,
+      bouncedEmails: campaign.bouncedEmails || bounced,
+      softBouncedEmails: softBounced,
+      openedEmails: opened,
+      clickedEmails: clicked,
+      openedEmailsA: variantA.filter(l => l.openedAt).length,
+      openedEmailsB: variantB.filter(l => l.openedAt).length,
+      sentEmailsA: variantA.filter(l => l.status === 'sent').length,
+      sentEmailsB: variantB.filter(l => l.status === 'sent').length,
+    };
 
     return {
-      campaign: campaignData,
-      metrics: {
-        sent,
-        delivered,
-        bounced,
-        failed,
-        opened,
-        clicked,
-        deliveryRate: sent > 0 ? ((delivered / sent) * 100).toFixed(1) : 0,
-        bounceRate: sent > 0 ? ((bounced / sent) * 100).toFixed(1) : 0,
-        openRate: delivered > 0 ? ((opened / delivered) * 100).toFixed(1) : 0,
-        clickRate: opened > 0 ? ((clicked / opened) * 100).toFixed(1) : 0
-      },
-      statusBreakdown: this.resultToObjects(statusBreakdown),
-      bounceReasons: this.resultToObjects(bounceReasons),
-      opensByHour: this.resultToObjects(opensByHour),
-      clicksByLink: this.resultToObjects(clicksByLink)
+      campaign: enrichedCampaign,
+      logs,
+      opensByHour,
+      clicksByLink,
+      total: logs.length,
+      sent,
+      failed,
+      bounced,
+      softBounced,
+      opened,
+      clicked,
+      uniqueOpens,
+      uniqueClicks,
+      openRate: sent > 0 ? ((uniqueOpens / sent) * 100).toFixed(1) : 0,
+      clickRate: sent > 0 ? ((uniqueClicks / sent) * 100).toFixed(1) : 0,
+      bounceRate: logs.length > 0 ? (((bounced + softBounced) / logs.length) * 100).toFixed(1) : 0,
+      abTest: {
+        A: { sent: variantA.filter(l => l.status === 'sent').length, opened: variantA.filter(l => l.openedAt).length },
+        B: { sent: variantB.filter(l => l.status === 'sent').length, opened: variantB.filter(l => l.openedAt).length }
+      }
     };
   }
 
-  // ==================== APP SETTINGS ====================
-  getSettings() {
-    const result = this.db.exec('SELECT * FROM app_settings WHERE id = 1');
-    const arr = this.resultToObjects(result);
-    return arr.length > 0 ? arr[0] : null;
+  // =================== TRACKING EVENTS ===================
+  getTrackingEvents(campaignId) {
+    return this._all('SELECT * FROM tracking_events WHERE campaignId = ? ORDER BY createdAt DESC', [campaignId]);
   }
 
-  saveSettings(settings) {
-    this.db.run(`UPDATE app_settings SET theme = ?, defaultBatchSize = ?, defaultDelayMinutes = ?, maxRetriesPerEmail = ?, enableTracking = ?, trackingDomain = ?, enableSmtpVerification = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = 1`,
-      [settings.theme, settings.defaultBatchSize, settings.defaultDelayMinutes, settings.maxRetriesPerEmail, settings.enableTracking ? 1 : 0, settings.trackingDomain, settings.enableSmtpVerification ? 1 : 0]);
-    this.save();
+  addTrackingEvent(event) {
+    const id = event.id || uuidv4();
+    this._run(
+      `INSERT INTO tracking_events (id, campaignId, contactId, email, type, link, userAgent,
+        ipAddress, client, device, os, isBot, country, region)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, event.campaignId, event.contactId || '', event.email || '', event.type,
+       event.link || '', event.userAgent || '', event.ipAddress || '',
+       event.client || '', event.device || '', event.os || '', event.isBot ? 1 : 0,
+       event.country || '', event.region || '']
+    );
+  }
+
+  // =================== SPAM REPLACEMENTS ===================
+  getAllSpamReplacements() {
+    return this._all('SELECT * FROM spam_replacements ORDER BY spamWord ASC');
+  }
+
+  addSpamReplacement(item) {
+    const id = item.id || uuidv4();
+    this._run('INSERT INTO spam_replacements (id, spamWord, replacement, category) VALUES (?, ?, ?, ?)',
+      [id, item.spamWord, item.replacement || '', item.category || 'general']);
+    return id;
+  }
+
+  updateSpamReplacement(item) {
+    this._run('UPDATE spam_replacements SET spamWord=?, replacement=?, category=? WHERE id=?',
+      [item.spamWord, item.replacement || '', item.category || 'general', item.id]);
+  }
+
+  deleteSpamReplacement(id) {
+    this._run('DELETE FROM spam_replacements WHERE id = ?', [id]);
+  }
+
+  // =================== SETTINGS ===================
+  getSetting(key) {
+    const result = this._get('SELECT value FROM settings WHERE key = ?', [key]);
+    return result ? result.value : null;
+  }
+
+  setSetting(key, value) {
+    this._run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+      [key, typeof value === 'string' ? value : JSON.stringify(value)]);
+  }
+
+  getAllSettings() {
+    const rows = this._all('SELECT * FROM settings');
+    const settings = {};
+    for (const row of rows) {
+      try {
+        settings[row.key] = JSON.parse(row.value);
+      } catch (e) {
+        settings[row.key] = row.value;
+      }
+    }
+    return settings;
+  }
+
+  saveAllSettings(settings) {
+    for (const [key, value] of Object.entries(settings)) {
+      this.setSetting(key, value);
+    }
+  }
+
+  // =================== WARMUP SCHEDULES ===================
+  getWarmupSchedules() {
+    return this._all('SELECT * FROM warmup_schedules ORDER BY createdAt DESC');
+  }
+
+  createWarmupSchedule(schedule) {
+    const id = schedule.id || uuidv4();
+    this._run('INSERT INTO warmup_schedules (id, smtpAccountId, schedule, isActive) VALUES (?, ?, ?, ?)',
+      [id, schedule.smtpAccountId, JSON.stringify(schedule.schedule || {}), schedule.isActive ? 1 : 0]);
+    return id;
+  }
+
+  updateWarmupSchedule(schedule) {
+    this._run('UPDATE warmup_schedules SET schedule=?, isActive=? WHERE id=?',
+      [JSON.stringify(schedule.schedule || {}), schedule.isActive ? 1 : 0, schedule.id]);
+  }
+
+  deleteWarmupSchedule(id) {
+    this._run('DELETE FROM warmup_schedules WHERE id = ?', [id]);
+  }
+
+  // =================== DASHBOARD STATS ===================
+  getDashboardStats() {
+    const contactStats = this.getContactStats();
+
+    const campaigns = this._all('SELECT * FROM campaigns ORDER BY createdAt DESC');
+    const blacklistCount = this._get('SELECT COUNT(*) as count FROM blacklist') || { count: 0 };
+    const unsubCount = this._get('SELECT COUNT(*) as count FROM unsubscribes') || { count: 0 };
+
+    const totalSent = campaigns.reduce((sum, c) => sum + (c.sentEmails || 0), 0);
+    const totalFailed = campaigns.reduce((sum, c) => sum + (c.failedEmails || 0), 0);
+    const totalBounced = campaigns.reduce((sum, c) => sum + (c.bouncedEmails || 0), 0);
+
+    // Calculate open/click rates from campaign logs
+    let allLogs = [];
+    try { allLogs = this._all('SELECT openedAt, clickedAt FROM campaign_logs WHERE status = ?', ['sent']); } catch(e) {}
+    const openedLogs = allLogs.filter(l => l.openedAt);
+    const clickedLogs = allLogs.filter(l => l.clickedAt);
+
+    const openRate = allLogs.length > 0 ? ((openedLogs.length / allLogs.length) * 100).toFixed(1) : 0;
+    const clickRate = allLogs.length > 0 ? ((clickedLogs.length / allLogs.length) * 100).toFixed(1) : 0;
+
+    // Recent campaigns (last 10)
+    const recentCampaigns = campaigns.slice(0, 10).map(c => ({
+      id: c.id,
+      name: c.name,
+      status: c.status,
+      sent: c.sentEmails || 0,
+      total: c.totalEmails || 0,
+      startedAt: c.startedAt,
+      completedAt: c.completedAt
+    }));
+
+    // SMTP account health
+    const smtpAccounts = this.getAllSmtpAccounts();
+    const smtpHealth = smtpAccounts.map(a => ({
+      id: a.id,
+      name: a.name || a.fromEmail,
+      isActive: !!a.isActive,
+      sentToday: a.sentToday || 0,
+      dailyLimit: a.dailyLimit,
+      warmUpEnabled: !!a.warmUpEnabled
+    }));
+
+    // Send history (last 30 days) - wrapped in try/catch for schema compatibility
+    let recentLogs = [];
+    try {
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      recentLogs = this._all(
+        "SELECT date(createdAt) as day, COUNT(*) as count FROM campaign_logs WHERE createdAt >= ? AND status = 'sent' GROUP BY date(createdAt) ORDER BY day ASC",
+        [thirtyDaysAgo]
+      );
+    } catch (e) {
+      // Older schema may lack createdAt - return empty history
+    }
+
+    // Compute overall deliverability score from multiple signals
+    let deliverabilityScore = 0;
+    const scores = [];
+    // Factor 1: Email delivery success rate (weight: 40%)
+    const deliveryRate = totalSent > 0 ? ((totalSent - totalBounced) / totalSent) * 100 : 100;
+    scores.push({ value: deliveryRate, weight: 0.4 });
+    // Factor 2: Contact list quality — verified ratio (weight: 25%)
+    const contactTotal = contactStats.total || 0;
+    const contactVerified = contactStats.verified || 0;
+    const listQuality = contactTotal > 0 ? (contactVerified / contactTotal) * 100 : 50;
+    scores.push({ value: listQuality, weight: 0.25 });
+    // Factor 3: Engagement — open rate (weight: 20%)
+    const engagementScore = Math.min(parseFloat(openRate) * 2, 100); // 50% open rate = perfect
+    scores.push({ value: engagementScore, weight: 0.2 });
+    // Factor 4: Complaint/bounce penalty (weight: 15%)
+    const bounceRate = totalSent > 0 ? (totalBounced / totalSent) : 0;
+    const cleanScore = Math.max(0, 100 - (bounceRate * 300)); // 33% bounce = 0 score
+    scores.push({ value: cleanScore, weight: 0.15 });
+    deliverabilityScore = Math.round(scores.reduce((sum, s) => sum + s.value * s.weight, 0));
+    // Clamp 0-100
+    deliverabilityScore = Math.max(0, Math.min(100, deliverabilityScore));
+
+    return {
+      contacts: contactStats,
+      campaigns: {
+        total: campaigns.length,
+        active: campaigns.filter(c => c.status === 'running').length,
+        completed: campaigns.filter(c => c.status === 'completed').length,
+        scheduled: campaigns.filter(c => c.status === 'scheduled').length,
+        draft: campaigns.filter(c => c.status === 'draft').length
+      },
+      emails: {
+        totalSent,
+        totalFailed,
+        totalBounced,
+        successRate: totalSent > 0 ? (((totalSent - totalBounced) / totalSent) * 100).toFixed(1) : 0,
+        openRate,
+        clickRate
+      },
+      deliverabilityScore,
+      blacklisted: blacklistCount?.count || 0,
+      unsubscribed: unsubCount?.count || 0,
+      recentCampaigns,
+      smtpHealth,
+      sendHistory: recentLogs
+    };
+  }
+
+  // =================== BACKUP & RESTORE ===================
+  createBackup(backupPath) {
+    this.flushSave(); // ensure all pending writes are on disk first
+    const data = this.db.export();
+    const buffer = Buffer.from(data);
+    fs.writeFileSync(backupPath, buffer);
+    return { success: true, path: backupPath, size: buffer.length };
+  }
+
+  restoreFromBackup(backupPath) {
+    if (!fs.existsSync(backupPath)) {
+      return { success: false, error: 'Backup file not found' };
+    }
+    const fileBuffer = fs.readFileSync(backupPath);
+    this.db.close();
+    this.db = new this.SQL.Database(fileBuffer);
+    this._save();
     return { success: true };
   }
 
-  // ==================== DASHBOARD STATS ====================
-  getDashboardStats() {
-    const totalContacts = this.db.exec('SELECT COUNT(*) as count FROM contacts')[0]?.values[0][0] || 0;
-    const verifiedContacts = this.db.exec('SELECT COUNT(*) as count FROM contacts WHERE verified = 1')[0]?.values[0][0] || 0;
-    const bouncedContacts = this.db.exec('SELECT COUNT(*) as count FROM contacts WHERE bounceCount > 0')[0]?.values[0][0] || 0;
-    const totalCampaigns = this.db.exec('SELECT COUNT(*) as count FROM campaigns')[0]?.values[0][0] || 0;
-    const totalSent = this.db.exec('SELECT COALESCE(SUM(sentEmails), 0) as count FROM campaigns')[0]?.values[0][0] || 0;
-    const totalBounced = this.db.exec('SELECT COALESCE(SUM(bouncedEmails), 0) as count FROM campaigns')[0]?.values[0][0] || 0;
-    const totalOpened = this.db.exec('SELECT COALESCE(SUM(openedEmails), 0) as count FROM campaigns')[0]?.values[0][0] || 0;
-    const totalClicked = this.db.exec('SELECT COALESCE(SUM(clickedEmails), 0) as count FROM campaigns')[0]?.values[0][0] || 0;
-    
-    // Calculate real rates
-    const delivered = totalSent - totalBounced;
-    const deliveryRate = totalSent > 0 ? ((delivered / totalSent) * 100).toFixed(1) : 0;
-    const bounceRate = totalSent > 0 ? ((totalBounced / totalSent) * 100).toFixed(1) : 0;
-    const openRate = delivered > 0 ? ((totalOpened / delivered) * 100).toFixed(1) : 0;
-    const clickRate = totalOpened > 0 ? ((totalClicked / totalOpened) * 100).toFixed(1) : 0;
-
-    const recentResult = this.db.exec(`SELECT c.*, l.name as listName FROM campaigns c LEFT JOIN lists l ON c.listId = l.id ORDER BY c.createdAt DESC LIMIT 5`);
-    const blacklistCount = this.db.exec('SELECT COUNT(*) as count FROM blacklist')[0]?.values[0][0] || 0;
-    const unsubscribeCount = this.db.exec('SELECT COUNT(*) as count FROM unsubscribes')[0]?.values[0][0] || 0;
-
-    // Recent bounces
-    const recentBounces = this.db.exec(`
-      SELECT email, failureReason, sentAt 
-      FROM campaign_logs 
-      WHERE status = 'bounced' OR failureType = 'hard_bounce'
-      ORDER BY sentAt DESC LIMIT 10
-    `);
-
-    return {
-      totalContacts, 
-      verifiedContacts,
-      bouncedContacts,
-      totalCampaigns, 
-      totalSent, 
-      totalBounced,
-      totalOpened,
-      totalClicked,
-      delivered,
-      deliveryRate,
-      bounceRate,
-      openRate,
-      clickRate,
-      blacklistCount, 
-      unsubscribeCount,
-      recentCampaigns: this.resultToObjects(recentResult),
-      recentBounces: this.resultToObjects(recentBounces)
-    };
+  getBackupInfo() {
+    if (fs.existsSync(this.dbPath)) {
+      const stats = fs.statSync(this.dbPath);
+      return {
+        exists: true,
+        path: this.dbPath,
+        size: stats.size,
+        lastModified: stats.mtime.toISOString()
+      };
+    }
+    return { exists: false };
   }
 
-  // Get verification stats
-  getVerificationStats() {
-    const total = this.db.exec('SELECT COUNT(*) as count FROM contacts')[0]?.values[0][0] || 0;
-    const valid = this.db.exec('SELECT COUNT(*) as count FROM contacts WHERE verified = 1 AND verificationScore >= 80')[0]?.values[0][0] || 0;
-    const risky = this.db.exec('SELECT COUNT(*) as count FROM contacts WHERE verificationScore >= 50 AND verificationScore < 80')[0]?.values[0][0] || 0;
-    const invalid = this.db.exec('SELECT COUNT(*) as count FROM contacts WHERE verified = 0 AND verificationScore < 50 AND verificationScore > 0')[0]?.values[0][0] || 0;
-    const unverified = this.db.exec('SELECT COUNT(*) as count FROM contacts WHERE verificationScore = 0')[0]?.values[0][0] || 0;
-    const disposable = this.db.exec('SELECT COUNT(*) as count FROM contacts WHERE isDisposable = 1')[0]?.values[0][0] || 0;
-    const roleBased = this.db.exec('SELECT COUNT(*) as count FROM contacts WHERE isRoleBased = 1')[0]?.values[0][0] || 0;
-    const catchAll = this.db.exec('SELECT COUNT(*) as count FROM contacts WHERE isCatchAll = 1')[0]?.values[0][0] || 0;
-
-    return { total, valid, risky, invalid, unverified, disposable, roleBased, catchAll };
+  // =================== CAMPAIGN RESUME ===================
+  getResumableCampaigns() {
+    return this._all("SELECT * FROM campaigns WHERE status = 'running' OR status = 'paused'");
   }
 
-  // Get bounce stats
-  getBounceStats() {
-    const totalBounces = this.db.exec(`SELECT COUNT(*) as count FROM campaign_logs WHERE status = 'bounced' OR failureType LIKE '%bounce%'`)[0]?.values[0][0] || 0;
-    const hardBounces = this.db.exec(`SELECT COUNT(*) as count FROM campaign_logs WHERE failureType = 'hard_bounce'`)[0]?.values[0][0] || 0;
-    const softBounces = this.db.exec(`SELECT COUNT(*) as count FROM campaign_logs WHERE failureType = 'soft_bounce'`)[0]?.values[0][0] || 0;
-    
-    const topReasons = this.db.exec(`
-      SELECT failureReason, COUNT(*) as count 
-      FROM campaign_logs 
-      WHERE failureReason IS NOT NULL 
-      GROUP BY failureReason 
-      ORDER BY count DESC 
-      LIMIT 5
-    `);
+  getSentEmailsForCampaign(campaignId) {
+    return this._all("SELECT email FROM campaign_logs WHERE campaignId = ? AND status = 'sent'", [campaignId])
+      .map(r => r.email);
+  }
 
-    return {
-      total: totalBounces,
-      hard: hardBounces,
-      soft: softBounces,
-      topReasons: this.resultToObjects(topReasons)
-    };
+  saveCampaignResumeData(campaignId, data) {
+    this._run("UPDATE campaigns SET resumeData = ?, updatedAt = datetime('now') WHERE id = ?",
+      [JSON.stringify(data), campaignId]);
+  }
+
+  // =================== SEGMENTS ===================
+  getAllSegments() {
+    return this._all('SELECT * FROM segments ORDER BY name ASC');
+  }
+
+  getSegment(id) {
+    return this._get('SELECT * FROM segments WHERE id = ?', [id]);
+  }
+
+  addSegment(segment) {
+    const id = segment.id || uuidv4();
+    const filters = typeof segment.filters === 'string' ? segment.filters : JSON.stringify(segment.filters || {});
+    this._run('INSERT INTO segments (id, name, filters) VALUES (?, ?, ?)', [id, segment.name, filters]);
+    return id;
+  }
+
+  updateSegment(segment) {
+    const filters = typeof segment.filters === 'string' ? segment.filters : JSON.stringify(segment.filters || {});
+    this._run("UPDATE segments SET name=?, filters=?, contactCount=?, updatedAt=datetime('now') WHERE id=?",
+      [segment.name, filters, segment.contactCount || 0, segment.id]);
+  }
+
+  deleteSegment(id) {
+    this._run('DELETE FROM segments WHERE id = ?', [id]);
+  }
+
+  getSegmentContacts(filters) {
+    let query = 'SELECT * FROM contacts WHERE 1=1';
+    const params = [];
+
+    if (filters.listId) { query += ' AND listId = ?'; params.push(filters.listId); }
+    if (filters.verificationStatus) { query += ' AND verificationStatus = ?'; params.push(filters.verificationStatus); }
+    if (filters.tag) { query += ' AND tags LIKE ?'; params.push(`%${filters.tag}%`); }
+    if (filters.hasCompany) { query += " AND company != ''"; }
+    if (filters.minBounce !== undefined) { query += ' AND bounceCount >= ?'; params.push(filters.minBounce); }
+    if (filters.maxBounce !== undefined) { query += ' AND bounceCount <= ?'; params.push(filters.maxBounce); }
+    if (filters.addedAfter) { query += ' AND createdAt >= ?'; params.push(filters.addedAfter); }
+    if (filters.addedBefore) { query += ' AND createdAt <= ?'; params.push(filters.addedBefore); }
+
+    query += ' ORDER BY createdAt DESC';
+    return this._all(query, params);
+  }
+
+  // =================== RETRY QUEUE ===================
+  addToRetryQueue(item) {
+    const id = item.id || uuidv4();
+    const nextRetry = new Date(Date.now() + Math.pow(2, item.attempts || 0) * 60000).toISOString();
+    this._run(
+      `INSERT OR IGNORE INTO retry_queue (id, campaignId, contactId, email, subject, content, variant, attempts, maxAttempts, lastError, nextRetryAt, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, item.campaignId, item.contactId || '', item.email, item.subject || '', item.content || '',
+       item.variant || 'A', item.attempts || 0, item.maxAttempts || 3, item.lastError || '', nextRetry, 'pending']
+    );
+    return id;
+  }
+
+  getPendingRetries() {
+    const now = new Date().toISOString();
+    return this._all("SELECT * FROM retry_queue WHERE status = 'pending' AND nextRetryAt <= ? ORDER BY nextRetryAt ASC LIMIT 50", [now]);
+  }
+
+  updateRetryItem(id, updates) {
+    if (updates.status === 'completed' || updates.status === 'failed') {
+      this._run('UPDATE retry_queue SET status=?, lastError=?, attempts=? WHERE id=?',
+        [updates.status, updates.lastError || '', updates.attempts || 0, id]);
+    } else {
+      const nextRetry = new Date(Date.now() + Math.pow(2, updates.attempts || 0) * 60000).toISOString();
+      this._run('UPDATE retry_queue SET attempts=?, lastError=?, nextRetryAt=? WHERE id=?',
+        [updates.attempts, updates.lastError || '', nextRetry, id]);
+    }
+  }
+
+  getRetryQueueStats() {
+    const pending = this._get("SELECT COUNT(*) as count FROM retry_queue WHERE status = 'pending'");
+    const completed = this._get("SELECT COUNT(*) as count FROM retry_queue WHERE status = 'completed'");
+    const failed = this._get("SELECT COUNT(*) as count FROM retry_queue WHERE status = 'failed'");
+    return { pending: pending?.count || 0, completed: completed?.count || 0, failed: failed?.count || 0 };
+  }
+
+  clearRetryQueue(campaignId) {
+    if (campaignId) {
+      this._run('DELETE FROM retry_queue WHERE campaignId = ?', [campaignId]);
+    } else {
+      this._run('DELETE FROM retry_queue');
+    }
+  }
+
+  // =================== DELIVERABILITY LOG ===================
+  logDeliverability(entry) {
+    const id = entry.id || uuidv4();
+    const existing = this._get('SELECT * FROM deliverability_log WHERE smtpAccountId = ? AND date = ?',
+      [entry.smtpAccountId, entry.date]);
+
+    if (existing) {
+      this._run(
+        `UPDATE deliverability_log SET sent=sent+?, delivered=delivered+?, bounced=bounced+?,
+         complained=complained+?, opened=opened+?, clicked=clicked+? WHERE id=?`,
+        [entry.sent || 0, entry.delivered || 0, entry.bounced || 0,
+         entry.complained || 0, entry.opened || 0, entry.clicked || 0, existing.id]
+      );
+    } else {
+      this._run(
+        `INSERT INTO deliverability_log (id, smtpAccountId, date, sent, delivered, bounced, complained, opened, clicked, score)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, entry.smtpAccountId, entry.date, entry.sent || 0, entry.delivered || 0,
+         entry.bounced || 0, entry.complained || 0, entry.opened || 0, entry.clicked || 0, entry.score || 100]
+      );
+    }
+  }
+
+  getDeliverabilityHistory(smtpAccountId, days = 30) {
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    return this._all(
+      'SELECT * FROM deliverability_log WHERE smtpAccountId = ? AND date >= ? ORDER BY date ASC',
+      [smtpAccountId, since]
+    );
+  }
+
+  getDeliverabilityScore(smtpAccountId) {
+    const recent = this.getDeliverabilityHistory(smtpAccountId, 7);
+    if (recent.length === 0) return 100;
+    const totalSent = recent.reduce((s, r) => s + r.sent, 0);
+    const totalBounced = recent.reduce((s, r) => s + r.bounced, 0);
+    const totalComplained = recent.reduce((s, r) => s + r.complained, 0);
+    if (totalSent === 0) return 100;
+    const bounceRate = totalBounced / totalSent;
+    const complaintRate = totalComplained / totalSent;
+    return Math.max(0, Math.round(100 - (bounceRate * 200) - (complaintRate * 500)));
+  }
+
+  // =================== BACKUP HISTORY ===================
+  addBackupRecord(record) {
+    const id = record.id || uuidv4();
+    this._run('INSERT INTO backup_history (id, filename, size, type) VALUES (?, ?, ?, ?)',
+      [id, record.filename, record.size || 0, record.type || 'manual']);
+    return id;
+  }
+
+  getBackupHistory() {
+    return this._all('SELECT * FROM backup_history ORDER BY createdAt DESC LIMIT 20');
+  }
+
+  // =================== GLOBAL SEARCH ===================
+  globalSearch(query) {
+    const q = `%${query}%`;
+    const contacts = this._all(
+      "SELECT id, email, firstName, lastName, company, 'contact' as type FROM contacts WHERE email LIKE ? OR firstName LIKE ? OR lastName LIKE ? OR company LIKE ? LIMIT 10",
+      [q, q, q, q]
+    );
+    const campaigns = this._all(
+      "SELECT id, name, status, 'campaign' as type FROM campaigns WHERE name LIKE ? OR subject LIKE ? LIMIT 10",
+      [q, q]
+    );
+    const templates = this._all(
+      "SELECT id, name, category, 'template' as type FROM templates WHERE name LIKE ? OR subject LIKE ? LIMIT 10",
+      [q, q]
+    );
+    return { contacts, campaigns, templates };
+  }
+
+  // =================== EXPORT HELPERS ===================
+  exportContactsData(contacts) {
+    if (!contacts || contacts.length === 0) {
+      return this.getAllContacts();
+    }
+    return contacts;
   }
 
   close() {
-    if (this.db) { this.save(); this.db.close(); }
+    if (this._autoSaveInterval) {
+      clearInterval(this._autoSaveInterval);
+      this._autoSaveInterval = null;
+    }
+    if (this.db) {
+      this.flushSave(); // flush any pending debounced write before closing
+      this.db.close();
+      this.db = null;
+    }
   }
 }
 
-module.exports = BulkyDatabase;
+module.exports = Database;

@@ -1,748 +1,1306 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+﻿const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
-const url = require('url');
-const XLSX = require('xlsx');
-const mammoth = require('mammoth');
+const crypto = require('crypto');
+const { version: APP_VERSION } = require('./package.json');
+
 const Database = require('./database/db');
 const EmailService = require('./services/emailService');
 const VerificationService = require('./services/verificationService');
 const SpamService = require('./services/spamService');
 const TrackingService = require('./services/trackingService');
+const DomainHealthService = require('./services/domainHealthService');
+const AIService = require('./services/aiService');
+const Logger = require('./services/logger');
+const ServiceManager = require('./services/serviceManager');
+const CrashReporter = require('./services/crashReporter');
+const registerBackupHandlers = require('./ipc/registerBackupHandlers');
+const registerCampaignHandlers = require('./ipc/registerCampaignHandlers');
+const registerContactsHandlers = require('./ipc/registerContactsHandlers');
+const registerContentHandlers = require('./ipc/registerContentHandlers');
+const registerDataHandlers = require('./ipc/registerDataHandlers');
+const registerMessagingHandlers = require('./ipc/registerMessagingHandlers');
+const registerOperationsHandlers = require('./ipc/registerOperationsHandlers');
+const registerSmtpHandlers = require('./ipc/registerSmtpHandlers');
+const registerSettingsHandlers = require('./ipc/registerSettingsHandlers');
+const registerSupportHandlers = require('./ipc/registerSupportHandlers');
 
-// PDF parsing helper - extracts emails from PDF without canvas dependency
-const parsePdfForEmails = async (filePath) => {
-  try {
-    // Dynamic import to avoid startup issues
-    const pdfParse = require('pdf-parse/lib/pdf-parse');
-    const dataBuffer = fs.readFileSync(filePath);
-    const data = await pdfParse(dataBuffer);
-    return data.text || '';
-  } catch (err) {
-    // Fallback: try to read raw bytes and extract emails with regex
-    console.error('PDF parse error, using fallback:', err.message);
-    try {
-      const buffer = fs.readFileSync(filePath);
-      const text = buffer.toString('utf-8', 0, Math.min(buffer.length, 1000000));
-      return text;
-    } catch (e) {
-      return '';
-    }
-  }
+// ============================================================
+// Process-level crash handlers with auto-recovery
+// ============================================================
+let crashReporter = null;
+let stabilityMetrics = {
+  crashes: 0,
+  lastCrash: null,
+  memoryWarnings: 0,
+  dbErrors: 0,
+  serviceFailures: 0,
+  errorCounts: {}, // Track error types for pattern analysis
+  lastErrorTime: null,
+  errorSeverity: 'info' // info, warning, error, critical
 };
 
-let mainWindow;
-let db;
-let dbPath;
-let emailService;
-let verificationService;
-let spamService;
-let trackingService;
-let trackingServer;
+// Enhanced error severity classification function
+function classifyErrorSeverity(error) {
+  if (!error) return 'info';
 
-const isDev = !app.isPackaged;
+  const message = (error.message || '').toLowerCase();
+  const stack = (error.stack || '').toLowerCase();
 
-function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
-    minWidth: 1200,
-    minHeight: 700,
-    frame: false,
-    backgroundColor: '#f8fafc',
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      sandbox: false,
-      preload: path.join(__dirname, 'preload.js')
-    },
-    icon: path.join(__dirname, 'assets', 'icon.ico')
-  });
-
-  if (isDev) {
-    mainWindow.loadURL('http://localhost:3000');
-    mainWindow.webContents.openDevTools();
-  } else {
-    mainWindow.loadFile(path.join(__dirname, 'renderer', 'build', 'index.html'));
+  // Critical errors - immediate attention needed
+  if (stack.includes('database') || stack.includes('disk') ||
+      message.includes('fatal') || message.includes('critical')) {
+    return 'critical';
   }
 
-  mainWindow.on('closed', () => { mainWindow = null; });
+  // High severity - likely to cause failures
+  if (stack.includes('connection') || stack.includes('timeout') ||
+      message.includes('network') || message.includes('timeout')) {
+    return 'error';
+  }
+
+  // Medium severity - should be monitored
+  if (stack.includes('warning') || message.includes('warning') ||
+      message.includes('deprecated')) {
+    return 'warning';
+  }
+
+  return 'info';
 }
 
-async function initializeServices() {
-  const userDataPath = app.getPath('userData');
-  dbPath = path.join(userDataPath, 'bulky.db');
-  
-  db = new Database(dbPath);
-  await db.init();
-  emailService = new EmailService(db);
-  verificationService = new VerificationService();
-  spamService = new SpamService(db);
-  trackingService = new TrackingService(db);
-  
-  // Start local tracking server
-  startTrackingServer();
-  
-  // Start campaign scheduler
-  startCampaignScheduler();
+process.on('uncaughtException', (error) => {
+  stabilityMetrics.crashes++;
+  stabilityMetrics.lastCrash = new Date().toISOString();
+  stabilityMetrics.lastErrorTime = Date.now();
+
+  // Classify error severity
+  stabilityMetrics.errorSeverity = classifyErrorSeverity(error);
+
+  // Track error types for pattern analysis
+  const errorType = error.name || 'UnknownError';
+  stabilityMetrics.errorCounts[errorType] = (stabilityMetrics.errorCounts[errorType] || 0) + 1;
+
+  console.error(`[${stabilityMetrics.errorSeverity.toUpperCase()}] ${errorType}:`, error.message, error.stack);
+  try { crashReporter?.report('uncaughtException', error); } catch (e) {}
+  try { logger?.error('Uncaught exception', {
+    message: error.message,
+    stack: error.stack,
+    severity: stabilityMetrics.errorSeverity,
+    errorType: errorType
+  }); } catch (e) {}
+
+  // Flush DB and clean up before exit so in-progress writes aren't lost
+  try { cleanup(); } catch (e) {}
+
+  // Attempt graceful shutdown
+  setTimeout(() => {
+    app.exit(1);
+  }, 1000);
+});
+
+process.on('unhandledRejection', (reason) => {
+  stabilityMetrics.lastErrorTime = Date.now();
+  stabilityMetrics.errorSeverity = classifyErrorSeverity(reason instanceof Error ? reason : new Error(String(reason)));
+
+  const error = reason instanceof Error ? reason : new Error(String(reason));
+  const errorType = error.name || 'UnknownError';
+  stabilityMetrics.errorCounts[errorType] = (stabilityMetrics.errorCounts[errorType] || 0) + 1;
+
+  try { crashReporter?.report('unhandledRejection', error); } catch (e) {}
+  try { logger?.error('Unhandled rejection', {
+    reason: error.message,
+    stack: error.stack,
+    severity: stabilityMetrics.errorSeverity,
+    errorType: errorType
+  }); } catch (e) {}
+});
+
+process.on('warning', (warning) => {
+  stabilityMetrics.errorSeverity = 'warning';
+
+  if (warning.name === 'MaxListenersExceededWarning') {
+    logger?.warn('Max listeners exceeded - potential memory leak', {
+      warning: warning.message,
+      severity: 'warning'
+    });
+  }
+
+  // Log all warnings with severity
+  try { logger?.warn('Process warning', {
+    warning: warning.message,
+    stack: warning.stack,
+    severity: 'warning'
+  }); } catch (e) {}
+});
+
+// Memory monitoring — started in initializeServices() after logger is ready
+let memMonitorInterval = null;
+function startMemoryMonitor() {
+  memMonitorInterval = setInterval(() => {
+    const memUsage = process.memoryUsage();
+    const heapUsedMB = Math.round(memUsage.heapUsed / 1024 / 1024);
+    const heapTotalMB = Math.round(memUsage.heapTotal / 1024 / 1024);
+
+    if (heapUsedMB > 500) { // High memory usage warning
+      stabilityMetrics.memoryWarnings++;
+      logger?.warn('High memory usage detected', {
+        heapUsed: heapUsedMB,
+        heapTotal: heapTotalMB,
+        external: Math.round(memUsage.external / 1024 / 1024)
+      });
+
+      // Force garbage collection if available
+      if (global.gc) {
+        global.gc();
+        logger?.info('Forced garbage collection');
+      }
+    }
+
+    // Log stability metrics every hour (tracked properly)
+    const _nowMs = Date.now();
+    if (!stabilityMetrics._lastLogged || _nowMs - stabilityMetrics._lastLogged >= 60 * 60 * 1000) {
+      stabilityMetrics._lastLogged = _nowMs;
+      logger?.info('Stability metrics', stabilityMetrics);
+    }
+  }, 30000); // Check every 30 seconds
 }
 
-// ==================== CAMPAIGN SCHEDULER ====================
-let schedulerInterval = null;
+// ============================================================
+// Globals
+// ============================================================
+let mainWindow = null;
+let tray = null;
+let db = null;
+let emailService = null;
+let verificationService = null;
+let spamService = null;
+let trackingService = null;
+let domainHealthService = null;
+let aiService = null;
+let logger = null;
+let serviceManager = null;
+let trackingServer = null;
+let scheduledCampaignTimers = new Map();
 
-function startCampaignScheduler() {
-  // Check for scheduled campaigns every minute
-  schedulerInterval = setInterval(async () => {
+const configuredUserDataPath = process.env.BULKY_USER_DATA_DIR
+  ? path.resolve(process.env.BULKY_USER_DATA_DIR)
+  : '';
+const userDataPath = configuredUserDataPath || app.getPath('userData');
+const dbPath = path.join(userDataPath, 'bulky.db');
+const logDir = path.join(userDataPath, 'logs');
+
+// Shared HMAC secret for unsubscribe token validation between email + tracking
+let hmacSecret = null;
+
+// SMTP password encryption helpers using Electron safeStorage
+function encryptPassword(plainText) {
+  if (!plainText) return plainText;
+  try {
+    if (safeStorage.isEncryptionAvailable()) {
+      const encrypted = safeStorage.encryptString(plainText);
+      return 'enc:' + encrypted.toString('base64');
+    }
+  } catch (error) {
+    console.error('Error encrypting password:', error);
+    return plainText;
+  }
+  return plainText;
+}
+
+function decryptPassword(stored) {
+  if (!stored || !stored.startsWith('enc:')) return stored;
+  try {
+    if (safeStorage.isEncryptionAvailable()) {
+      const buffer = Buffer.from(stored.slice(4), 'base64');
+      return safeStorage.decryptString(buffer);
+    }
+  } catch (error) {
+    console.error('Error decrypting password:', error);
+    return stored;
+  }
+  return stored;
+}
+
+function decryptSmtpAccount(account) {
+  if (!account) return account;
+  return { ...account, password: decryptPassword(account.password) };
+}
+
+function normalizeTrackingDomain(trackingDomain) {
+  if (!trackingDomain || typeof trackingDomain !== 'string') return '';
+  const trimmed = trackingDomain.trim();
+  if (!trimmed) return '';
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+}
+
+function getDeliverabilitySettings() {
+  const raw = db?.getSetting('deliverability');
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function getLocalTrackingBaseUrl() {
+  const port = trackingServer?.address()?.port || 3847;
+  return `http://127.0.0.1:${port}`;
+}
+
+function syncTrackingBaseUrl(settings = null) {
+  const resolved = settings ?? getDeliverabilitySettings();
+  const trackingDomain = resolved?.trackingDomain;
+  const baseUrl = normalizeTrackingDomain(trackingDomain) || getLocalTrackingBaseUrl();
+
+  if (emailService) {
+    emailService.setTrackingBaseUrl(baseUrl);
+    // Sync sending mode and physical address footer
+    if (typeof emailService.setSendingMode === 'function') {
+      emailService.setSendingMode(resolved?.sendingMode || 'bulk');
+    }
+    if (typeof emailService.setCompanyAddress === 'function') {
+      emailService.setCompanyAddress(resolved?.companyAddress || '');
+    }
+  }
+  if (trackingService) {
+    trackingService.setTrackingBaseUrl(baseUrl);
+  }
+
+  return baseUrl;
+}
+
+function getConfiguredDkimSelectors(domain) {
+  const normalizedDomain = String(domain || '').trim().toLowerCase();
+  if (!normalizedDomain || !db?.getAllSmtpAccounts) return [];
+
+  const selectors = new Set();
+  for (const account of db.getAllSmtpAccounts()) {
+    const fromDomain = String(account.fromEmail || account.username || '')
+      .split('@')[1]
+      ?.trim()
+      .toLowerCase();
+    const dkimDomain = String(account.dkimDomain || '').trim().toLowerCase();
+    const selector = String(account.dkimSelector || '').trim().toLowerCase();
+
+    if (selector && (fromDomain === normalizedDomain || dkimDomain === normalizedDomain)) {
+      selectors.add(selector);
+    }
+  }
+
+  return Array.from(selectors);
+}
+
+function getPrimarySmtpAccount(activeOnly = false) {
+  if (!db) return null;
+  if (typeof db.getPrimarySmtpAccount === 'function') {
+    return db.getPrimarySmtpAccount(activeOnly);
+  }
+
+  const accounts = activeOnly && typeof db.getActiveSmtpAccounts === 'function'
+    ? db.getActiveSmtpAccounts()
+    : typeof db.getAllSmtpAccounts === 'function'
+      ? db.getAllSmtpAccounts()
+      : [];
+
+  return Array.isArray(accounts) && accounts.length > 0 ? accounts[0] : null;
+}
+
+// ============================================================
+// Window
+// ============================================================
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1280,
+    height: 800,
+    minWidth: 960,
+    minHeight: 600,
+    frame: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    },
+    icon: path.join(__dirname, 'assets', 'icon.ico'),
+    show: false
+  });
+
+  // Load renderer
+  const rendererPath = path.join(__dirname, 'renderer', 'build', 'index.html');
+  if (fs.existsSync(rendererPath)) {
+    mainWindow.loadFile(rendererPath);
+  } else {
+    // Dev mode fallback
+    mainWindow.loadURL('http://localhost:3000');
+  }
+
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.show();
+  });
+
+  // Minimize to tray on close instead of quitting
+  mainWindow.on('close', (event) => {
+    if (!app.isQuitting) {
+      event.preventDefault();
+      mainWindow.hide();
+      // One-time balloon hint so the user knows the app is still running
+      if (tray && !app._trayHintShown) {
+        app._trayHintShown = true;
+        try {
+          tray.displayBalloon({
+            iconType: 'info',
+            title: 'Bulky is still running',
+            content: 'Bulky is running in the background. Click the tray icon to reopen it.'
+          });
+        } catch (e) {}
+      }
+    }
+  });
+
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+}
+
+// ============================================================
+// System Tray
+// ============================================================
+function getTrayIconPath() {
+  // In the packaged app the icon is copied to resources/ via extraResources.
+  // Electron cannot use nativeImage from inside an asar for Tray on Windows —
+  // it must point to a real file on disk.
+  const candidates = [
+    process.resourcesPath && path.join(process.resourcesPath, 'icon.ico'),
+    path.join(__dirname, 'assets', 'icon.ico'),
+    path.join(path.dirname(process.execPath), 'resources', 'icon.ico'),
+  ].filter(Boolean);
+
+  for (const p of candidates) {
+    try { if (fs.existsSync(p)) return p; } catch (e) {}
+  }
+  return null;
+}
+
+function createTray() {
+  const iconFilePath = getTrayIconPath();
+  let trayImage = null;
+
+  if (iconFilePath) {
     try {
-      const scheduledCampaigns = db.getScheduledCampaigns();
-      const now = new Date();
-      
-      for (const campaign of scheduledCampaigns) {
-        const scheduledAt = new Date(campaign.scheduledAt);
-        if (scheduledAt <= now) {
-          console.log(`Starting scheduled campaign: ${campaign.name}`);
-          await runScheduledCampaign(campaign);
+      trayImage = nativeImage.createFromPath(iconFilePath);
+      // Windows system tray requires 16×16; resize ensures it's never blank.
+      if (!trayImage.isEmpty()) {
+        trayImage = trayImage.resize({ width: 16, height: 16 });
+      }
+    } catch (e) {
+      logger?.warn('Tray icon load failed', { error: e.message, path: iconFilePath });
+    }
+  }
+
+  // Fallback: a minimal 16×16 solid-colour PNG so the tray is never invisible.
+  if (!trayImage || trayImage.isEmpty()) {
+    // 1×1 PNG stretched to 16×16 (cyan-blue #5bb4d4) — valid PNG base64
+    const fallbackPng = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPj/HgAHggJ/PchI6QAAAABJRU5ErkJggg==';
+    try {
+      trayImage = nativeImage.createFromDataURL(fallbackPng);
+      trayImage = trayImage.resize({ width: 16, height: 16 });
+    } catch (e) {
+      trayImage = nativeImage.createEmpty();
+    }
+  }
+
+  tray = new Tray(trayImage);
+
+  const buildMenu = () => Menu.buildFromTemplate([
+    {
+      label: 'Open Bulky',
+      click: () => {
+        if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
+        else { createWindow(); }
+      }
+    },
+    {
+      label: 'Settings',
+      click: () => {
+        if (mainWindow) {
+          mainWindow.show();
+          mainWindow.focus();
+          // Tell the renderer to navigate to the Settings page
+          if (!mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('navigate:page', '/settings');
+          }
+        } else {
+          createWindow();
         }
       }
-    } catch (error) {
-      console.error('Scheduler error:', error);
+    },
+    { type: 'separator' },
+    {
+      label: `Bulky v${APP_VERSION}`,
+      enabled: false   // informational label — grayed out
+    },
+    { type: 'separator' },
+    {
+      label: 'Quit Bulky',
+      click: () => {
+        app.isQuitting = true;
+        cleanup();
+        app.quit();
+      }
+    }
+  ]);
+
+  tray.setToolTip(`Bulky Email Sender v${APP_VERSION}`);
+  tray.setContextMenu(buildMenu());
+
+  // Single click → toggle window visibility
+  tray.on('click', () => {
+    if (!mainWindow) { createWindow(); return; }
+    if (mainWindow.isVisible() && !mainWindow.isMinimized()) {
+      mainWindow.hide();
+    } else {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+
+  // Double-click always brings window to front
+  tray.on('double-click', () => {
+    if (!mainWindow) { createWindow(); return; }
+    mainWindow.show();
+    mainWindow.focus();
+  });
+}
+
+// ============================================================
+// Initialize services
+// ============================================================
+async function initializeServices() {
+  logger = new Logger(logDir);
+  crashReporter = new CrashReporter(logDir, APP_VERSION);
+  logger.info('Bulky starting up', { version: APP_VERSION, dbPath });
+  logger.cleanupOldLogs();
+
+  db = new Database(dbPath);
+  await db.initialize();
+  logger.info('Database initialized');
+
+  // Load or generate HMAC secret (encrypted for security)
+  const storedHmacSecret = db.getSetting('hmac_secret');
+  if (!storedHmacSecret) {
+    hmacSecret = crypto.randomBytes(32).toString('hex');
+    db.setSetting('hmac_secret', encryptPassword(hmacSecret));
+  } else {
+    hmacSecret = decryptPassword(storedHmacSecret);
+  }
+
+  serviceManager = new ServiceManager(logger);
+  const deliverabilitySettings = getDeliverabilitySettings();
+
+  emailService = new EmailService(db, hmacSecret);
+  emailService.setPasswordDecryptor(decryptPassword);
+  serviceManager.registerService('EmailService', emailService);
+
+  verificationService = new VerificationService();
+  serviceManager.registerService('VerificationService', verificationService);
+
+  spamService = new SpamService(db);
+  serviceManager.registerService('SpamService', spamService);
+
+  trackingService = new TrackingService(db);
+  trackingService.setHmacSecret(hmacSecret);
+  serviceManager.registerService('TrackingService', trackingService);
+
+  domainHealthService = new DomainHealthService();
+  syncTrackingBaseUrl(deliverabilitySettings);
+
+  // Restore persisted sending-mode and company address so they survive restarts.
+  // Without this, emailService always boots with 'bulk' / '' regardless of saved settings.
+  if (typeof emailService.setSendingMode === 'function') {
+    emailService.setSendingMode(deliverabilitySettings.sendingMode || 'bulk');
+  }
+  if (typeof emailService.setCompanyAddress === 'function') {
+    emailService.setCompanyAddress(deliverabilitySettings.companyAddress || '');
+  }
+
+  // AI Service
+  aiService = new AIService();
+  const aiSettings = db.getSetting('ai');
+  if (aiSettings) {
+    try {
+      const parsed = JSON.parse(aiSettings);
+      if (parsed.apiKey) {
+        const decryptedKey = decryptPassword(parsed.apiKey);
+        aiService.setApiKey(decryptedKey);
+      }
+      if (parsed.model) aiService.setModel(parsed.model);
+    } catch (e) {}
+  }
+
+  startTrackingServer();
+  loadScheduledCampaigns();
+  resumeInterruptedCampaigns();
+  startRetryProcessor();
+  startAutoBackup();
+  startMemoryMonitor();
+  startServiceHealthMonitor();
+
+  logger.info('All services initialized');
+}
+
+// ============================================================
+// Campaign resume on restart
+// ============================================================
+async function resumeInterruptedCampaigns() {
+  try {
+    const resumable = db.getResumableCampaigns();
+    if (resumable.length === 0) return;
+    logger.info(`Found ${resumable.length} interrupted campaign(s) to resume`);
+
+    for (const campaign of resumable) {
+      // Only resume if NOT manually paused by user
+      if (campaign.status === 'paused') {
+        logger.info(`Skipping paused campaign: ${campaign.name}`);
+        continue;
+      }
+      const sentEmails = db.getSentEmailsForCampaign(campaign.id);
+      const sentSet = new Set(sentEmails);
+      const filter = { listId: campaign.listId || '', verificationStatus: campaign.verificationFilter || '' };
+      if (campaign.tagFilter) {
+        try {
+          const tags = JSON.parse(campaign.tagFilter);
+          if (Array.isArray(tags) && tags.length) filter.tags = tags;
+          else if (typeof campaign.tagFilter === 'string' && campaign.tagFilter.trim()) filter.tag = campaign.tagFilter;
+        } catch (e) {
+          filter.tag = campaign.tagFilter;
+        }
+      }
+      const allContacts = db.getContactsForCampaign(filter);
+      const remaining = allContacts.filter(c => !sentSet.has(c.email));
+
+      if (remaining.length === 0) {
+        campaign.status = 'completed';
+        campaign.completedAt = new Date().toISOString();
+        db.updateCampaign(campaign);
+        notifyDataChanged('campaigns', { source: 'resume' });
+        logger.info(`Campaign "${campaign.name}" had no remaining contacts — marked completed`);
+        continue;
+      }
+
+      logger.info(`Resuming campaign "${campaign.name}" — ${remaining.length} contacts remaining`);
+      const smtpAccounts = db.getActiveSmtpAccounts();
+      if (smtpAccounts.length === 0) {
+        campaign.status = 'failed';
+        db.updateCampaign(campaign);
+        continue;
+      }
+
+      const preferredAccount = campaign.smtpAccountId
+        ? smtpAccounts.find(a => a.id === campaign.smtpAccountId) || smtpAccounts[0]
+        : smtpAccounts[0];
+      const smtpSettings = decryptSmtpAccount(preferredAccount);
+      emailService.sendCampaign(campaign, remaining, smtpSettings, (progress) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('email:progress', { ...progress, resumed: true });
+        }
+      }).then(result => {
+        logger.info(`Resumed campaign "${campaign.name}" completed`, result);
+      }).catch(err => {
+        logger.error(`Resumed campaign "${campaign.name}" failed`, { error: err.message });
+      });
+    }
+  } catch (e) {
+    logger.error('Failed to resume campaigns', { error: e.message });
+  }
+}
+
+// ============================================================
+// Retry processor — retries soft-bounced/failed emails
+// ============================================================
+let retryInterval;
+const _retryInFlight = new Set(); // Guard against double-send on slow SMTP
+function startRetryProcessor() {
+  retryInterval = setInterval(async () => {
+    try {
+      const retries = db.getPendingRetries();
+      if (retries.length === 0) return;
+
+      const smtpAccounts = db.getActiveSmtpAccounts();
+      if (smtpAccounts.length === 0) return;
+
+      for (const item of retries) {
+        if (_retryInFlight.has(item.id)) continue; // skip if already being processed
+        _retryInFlight.add(item.id);
+        try {
+          const account = decryptSmtpAccount(smtpAccounts[item.attempts % smtpAccounts.length]);
+          const transporter = emailService.getTransporter(account);
+          await transporter.sendMail({
+            from: `"${account.fromName}" <${account.fromEmail}>`,
+            to: item.email,
+            subject: item.subject,
+            html: item.content
+          });
+          db.updateRetryItem(item.id, { status: 'completed', attempts: item.attempts + 1 });
+          // Update campaign log
+          db.addCampaignLog({ campaignId: item.campaignId, contactId: item.contactId, email: item.email, status: 'sent', variant: item.variant });
+          notifyDataChanged('campaigns', { source: 'retry' });
+        } catch (err) {
+          const newAttempts = item.attempts + 1;
+          if (newAttempts >= item.maxAttempts) {
+            db.updateRetryItem(item.id, { status: 'failed', lastError: err.message, attempts: newAttempts });
+          } else {
+            db.updateRetryItem(item.id, { attempts: newAttempts, lastError: err.message });
+          }
+        } finally {
+          _retryInFlight.delete(item.id);
+        }
+      }
+    } catch (e) {
+      console.warn('Retry processor error:', e.message);
+      logger?.warn('Retry processor error', { error: e.message });
     }
   }, 60000); // Check every minute
-  
-  // Also check immediately on startup
-  setTimeout(async () => {
+}
+
+// ============================================================
+// Auto-backup
+// ============================================================
+let autoBackupInterval;
+function resolveAutoBackupDirectory() {
+  const candidateBuilders = [
+    () => path.join(app.getPath('documents'), 'Bulky Backups'),
+    () => path.join(userDataPath, 'backups')
+  ];
+
+  for (const buildPath of candidateBuilders) {
+    let backupDir = '';
+
     try {
-      const scheduledCampaigns = db.getScheduledCampaigns();
-      const now = new Date();
-      
-      for (const campaign of scheduledCampaigns) {
-        const scheduledAt = new Date(campaign.scheduledAt);
-        if (scheduledAt <= now) {
-          console.log(`Starting scheduled campaign: ${campaign.name}`);
-          await runScheduledCampaign(campaign);
-        }
-      }
+      backupDir = buildPath();
     } catch (error) {
-      console.error('Startup scheduler check error:', error);
+      logger?.warn('Auto-backup path unavailable', { error: error.message });
+      continue;
     }
-  }, 5000);
+
+    try {
+      if (!fs.existsSync(backupDir)) {
+        fs.mkdirSync(backupDir, { recursive: true });
+      }
+      return backupDir;
+    } catch (error) {
+      logger?.warn('Auto-backup directory unavailable', { path: backupDir, error: error.message });
+    }
+  }
+
+  return '';
+}
+
+function startAutoBackup() {
+  const backupDir = resolveAutoBackupDirectory();
+  if (!backupDir) {
+    logger?.warn('Auto-backup disabled: no writable backup directory available');
+    return;
+  }
+
+  autoBackupInterval = setInterval(() => {
+    try {
+      const setting = db.getSetting('autoBackup');
+      if (!setting) return;
+      const config = typeof setting === 'string' ? JSON.parse(setting) : setting;
+      if (!config.enabled) return;
+
+      const lastBackup = db.getSetting('lastAutoBackup');
+      const interval = (config.intervalHours || 24) * 60 * 60 * 1000;
+      if (lastBackup && (Date.now() - new Date(lastBackup).getTime()) < interval) return;
+
+      const filename = `bulky-auto-${new Date().toISOString().replace(/[:.]/g, '-')}.db`;
+      const backupPath = path.join(backupDir, filename);
+      const result = db.createBackup(backupPath);
+      if (result.success) {
+        db.addBackupRecord({ filename, size: result.size, type: 'auto' });
+        db.setSetting('lastAutoBackup', new Date().toISOString());
+        // Keep only last 5 auto backups
+        const history = db.getBackupHistory().filter(b => b.type === 'auto');
+        if (history.length > 5) {
+          for (const old of history.slice(5)) {
+            const oldPath = path.join(backupDir, old.filename);
+            try { if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath); } catch (e) {}
+          }
+        }
+        logger.info('Auto-backup created', { filename });
+      }
+    } catch (e) {
+      console.warn('Auto-backup error:', e.message);
+      logger?.warn('Auto-backup error', { error: e.message });
+    }
+  }, 300000); // Check every 5 minutes
+}
+
+
+// ============================================================
+// Tracking HTTP Server (open/click/unsubscribe)
+// ============================================================
+function startTrackingServer() {
+  trackingServer = http.createServer(async (req, res) => {
+    const parsedUrl = new URL(req.url, 'http://127.0.0.1');
+    const pathname = parsedUrl.pathname;
+
+    const metadata = {
+      userAgent: req.headers['user-agent'],
+      ipAddress: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
+      headers: req.headers
+    };
+
+    // Open tracking: GET /track/open/:campaignId/:contactId/:trackingId
+    const openMatch = pathname.match(/^\/track\/open\/([^/]+)\/([^/]+)\/([^/]+)$/);
+    if (openMatch && req.method === 'GET') {
+      const [, campaignId, contactId, trackingId] = openMatch;
+      try {
+        await trackingService.recordOpen(campaignId, contactId, trackingId, metadata);
+        // Push update to renderer immediately — Dashboard and Analytics pages
+        // subscribe to this event so open counts appear without waiting for the
+        // next poll cycle.
+        notifyDataChanged('campaigns', { source: 'tracking', event: 'open', campaignId });
+      } catch (e) {}
+      const pixel = trackingService.getTrackingPixelBuffer();
+      res.writeHead(200, {
+        'Content-Type': 'image/gif',
+        'Content-Length': pixel.length,
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+      });
+      res.end(pixel);
+      return;
+    }
+
+    // Click tracking: GET /track/click/:campaignId/:contactId/:trackingId?url=...
+    const clickMatch = pathname.match(/^\/track\/click\/([^/]+)\/([^/]+)\/([^/]+)$/);
+    if (clickMatch && req.method === 'GET') {
+      const [, campaignId, contactId, trackingId] = clickMatch;
+      const redirectUrl = parsedUrl.searchParams.get('url');
+      try {
+        await trackingService.recordClick(campaignId, contactId, trackingId, redirectUrl, metadata);
+        // Same as open tracking — push immediately so click counts update live.
+        notifyDataChanged('campaigns', { source: 'tracking', event: 'click', campaignId });
+      } catch (e) {}
+      if (redirectUrl) {
+        try {
+          const parsed = new URL(redirectUrl);
+          if (['http:', 'https:'].includes(parsed.protocol)) {
+            res.writeHead(302, { 'Location': redirectUrl });
+            res.end();
+            return;
+          }
+        } catch (e) {}
+      }
+      res.writeHead(400);
+      res.end('Invalid redirect URL');
+      return;
+    }
+
+    // Unsubscribe: GET /unsubscribe/:campaignId/:contactId?email=...&token=...
+    const unsubMatch = pathname.match(/^\/unsubscribe\/([^/]+)\/([^/]+)$/);
+    if (unsubMatch && req.method === 'GET') {
+      const [, campaignId, contactId] = unsubMatch;
+      const email = parsedUrl.searchParams.get('email');
+      const token = parsedUrl.searchParams.get('token');
+      let result = { success: false };
+      try { result = await trackingService.handleUnsubscribe(campaignId, contactId, email, null, token); } catch (e) {}
+      const html = trackingService.getUnsubscribePageHtml(result.success, email || '');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+      if (result.success && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('tracking:unsubscribe', { email, campaignId });
+      }
+      return;
+    }
+
+    // Health check
+    if (pathname === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', port: trackingServer.address()?.port }));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end('Not found');
+  });
+
+  function tryPort(port, attempt = 0) {
+    const onListening = () => {
+      const actualPort = trackingServer.address().port;
+      logger.info(`Tracking server started on port ${actualPort}`);
+
+      syncTrackingBaseUrl(getDeliverabilitySettings());
+    };
+
+    const onError = (err) => {
+      // Prevent stale listeners from previous failed attempts firing on a later success.
+      trackingServer.removeListener('listening', onListening);
+      if (err.code === 'EADDRINUSE' && attempt < 5) {
+        trackingServer.close();
+        tryPort(port + 1, attempt + 1);
+      } else {
+        logger.error('Failed to start tracking server', { error: err.message });
+      }
+    };
+
+    trackingServer.once('listening', onListening);
+    trackingServer.once('error', onError);
+    trackingServer.listen(port, '127.0.0.1');
+  }
+
+  tryPort(3847);
+}
+
+// ============================================================
+// Scheduled campaign support
+// ============================================================
+function loadScheduledCampaigns() {
+  try {
+    const scheduled = db.getScheduledCampaigns();
+    for (const campaign of scheduled) {
+      scheduleNextCampaign(campaign);
+    }
+  } catch (e) {
+    logger.error('Error loading scheduled campaigns', { error: e.message });
+  }
+}
+
+function scheduleNextCampaign(campaign) {
+  if (!campaign.scheduledAt) return;
+  const scheduledTime = new Date(campaign.scheduledAt).getTime();
+  const now = Date.now();
+  const delay = scheduledTime - now;
+
+  if (delay <= 0) {
+    // Past due - run immediately
+    runScheduledCampaign(campaign);
+    return;
+  }
+
+  // Clamp delay to MAX_SAFE_TIMEOUT (~24.8 days) to avoid 32-bit overflow
+  const MAX_SAFE_TIMEOUT = 2147483647;
+  const safeDelay = Math.min(delay, MAX_SAFE_TIMEOUT);
+  const timer = setTimeout(() => {
+    // Re-check if still in the future after waking up from clamped timeout
+    if (Date.now() < scheduledTime) { scheduleNextCampaign(campaign); return; }
+    runScheduledCampaign(campaign);
+  }, safeDelay);
+
+  scheduledCampaignTimers.set(campaign.id, timer);
 }
 
 async function runScheduledCampaign(campaign) {
   try {
-    // Get SMTP settings
-    const smtpSettings = db.getSmtpSettings();
-    if (!smtpSettings?.host) {
-      console.error('No SMTP settings configured for scheduled campaign');
-      return;
-    }
-    
-    // Get contacts
-    const filter = { listId: campaign.listId || '' };
-    const contacts = db.getContactsForCampaign(filter);
-    
-    if (contacts.length === 0) {
-      console.log('No contacts for scheduled campaign');
-      db.updateCampaign({ ...campaign, status: 'completed', completedAt: new Date().toISOString() });
-      return;
-    }
-    
-    // Update campaign status
+    logger.logCampaign('scheduled_start', campaign.id, { name: campaign.name });
     campaign.status = 'running';
-    campaign.startedAt = new Date().toISOString();
-    campaign.totalEmails = contacts.length;
     db.updateCampaign(campaign);
-    
-    // Send emails
+
+    const filter = { listId: campaign.listId || '', verificationStatus: campaign.verificationFilter || '' };
+    if (campaign.tagFilter) {
+      try { const tags = JSON.parse(campaign.tagFilter); if (Array.isArray(tags) && tags.length) filter.tags = tags; } catch (e) {}
+    }
+    const contacts = db.getContactsForCampaign(filter);
+
+    const smtpAccounts = db.getActiveSmtpAccounts();
+    if (smtpAccounts.length === 0) {
+      logger.error('No active SMTP accounts for scheduled campaign', { campaignId: campaign.id });
+      campaign.status = 'failed';
+      db.updateCampaign(campaign);
+      return;
+    }
+
+    const smtpSettings = decryptSmtpAccount(smtpAccounts[0]);
     await emailService.sendCampaign(campaign, contacts, smtpSettings, (progress) => {
-      if (mainWindow) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('email:progress', progress);
       }
     });
-    
   } catch (error) {
-    console.error('Error running scheduled campaign:', error);
-    db.updateCampaign({ ...campaign, status: 'failed' });
+    logger.error('Scheduled campaign failed', { campaignId: campaign.id, error: error.message });
+    campaign.status = 'failed';
+    db.updateCampaign(campaign);
+  } finally {
+    // Always clean up the timer reference
+    scheduledCampaignTimers.delete(campaign.id);
   }
 }
 
-// ==================== TRACKING SERVER ====================
-function startTrackingServer() {
-  const TRACKING_PORT = 3847;
-  
-  trackingServer = http.createServer(async (req, res) => {
-    const parsedUrl = url.parse(req.url, true);
-    const pathname = parsedUrl.pathname;
-    const query = parsedUrl.query;
-    
-    // Get client info for tracking
-    const metadata = {
-      userAgent: req.headers['user-agent'] || null,
-      ipAddress: req.headers['x-forwarded-for'] || req.socket.remoteAddress || null
-    };
+// Service health monitoring — started in initializeServices() after all services are ready
+let serviceHealthInterval = null;
+function startServiceHealthMonitor() {
+  serviceHealthInterval = setInterval(() => {
+    const services = [
+      { name: 'Database', check: () => db && db.db },
+      { name: 'EmailService', check: () => emailService && typeof emailService.sendSingleEmail === 'function' },
+      { name: 'TrackingServer', check: () => trackingServer && trackingServer.listening },
+      { name: 'Logger', check: () => logger && typeof logger.info === 'function' }
+    ];
 
-    // CORS headers for tracking
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-
-    try {
-      // Open tracking: /track/open/:campaignId/:recipientId/:trackingId
-      if (pathname.startsWith('/track/open/')) {
-        const parts = pathname.split('/').filter(Boolean);
-        const campaignId = parts[2];
-        const recipientId = parts[3];
-        const trackingId = parts[4];
-
-        if (campaignId && trackingId) {
-          await trackingService.recordOpen(campaignId, recipientId, trackingId, metadata);
+    for (const service of services) {
+      try {
+        if (!service.check()) {
+          logger?.error(`Service health check failed: ${service.name}`);
+          stabilityMetrics.serviceFailures = (stabilityMetrics.serviceFailures || 0) + 1;
         }
-
-        // Return 1x1 transparent GIF
-        const pixel = trackingService.getTrackingPixelBuffer();
-        res.writeHead(200, {
-          'Content-Type': 'image/gif',
-          'Content-Length': pixel.length
-        });
-        res.end(pixel);
-        return;
+      } catch (e) {
+        logger?.error(`Service health check error for ${service.name}`, { error: e.message });
       }
-
-      // Click tracking: /track/click/:campaignId/:recipientId/:trackingId?url=...
-      if (pathname.startsWith('/track/click/')) {
-        const parts = pathname.split('/').filter(Boolean);
-        const campaignId = parts[2];
-        const recipientId = parts[3];
-        const trackingId = parts[4];
-        const redirectUrl = query.url ? decodeURIComponent(query.url) : null;
-
-        if (campaignId && trackingId && redirectUrl) {
-          await trackingService.recordClick(campaignId, recipientId, trackingId, redirectUrl, metadata);
-        }
-
-        // Redirect to original URL
-        if (redirectUrl) {
-          res.writeHead(302, { 'Location': redirectUrl });
-          res.end();
-        } else {
-          res.writeHead(400, { 'Content-Type': 'text/plain' });
-          res.end('Missing redirect URL');
-        }
-        return;
-      }
-
-      // Unsubscribe: /unsubscribe/:campaignId/:recipientId?email=...
-      if (pathname.startsWith('/unsubscribe/')) {
-        const parts = pathname.split('/').filter(Boolean);
-        const campaignId = parts[1];
-        const recipientId = parts[2];
-        const email = query.email ? decodeURIComponent(query.email) : null;
-
-        let success = false;
-        if (email) {
-          const result = await trackingService.handleUnsubscribe(campaignId, recipientId, email);
-          success = result.success;
-        }
-
-        // Return unsubscribe confirmation page
-        const html = trackingService.getUnsubscribePageHtml(success, email || 'Unknown');
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(html);
-        return;
-      }
-
-      // Health check
-      if (pathname === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', service: 'bulky-tracking' }));
-        return;
-      }
-
-      // 404 for unknown paths
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end('Not Found');
-
-    } catch (error) {
-      console.error('Tracking server error:', error);
-      res.writeHead(500, { 'Content-Type': 'text/plain' });
-      res.end('Internal Server Error');
     }
-  });
+  }, 60000); // Check every minute
+}
 
-  trackingServer.listen(TRACKING_PORT, '127.0.0.1', () => {
-    console.log(`Tracking server running on http://127.0.0.1:${TRACKING_PORT}`);
-  });
 
-  trackingServer.on('error', (err) => {
-    if (err.code === 'EADDRINUSE') {
-      console.log(`Tracking port ${TRACKING_PORT} in use, trying next port...`);
-      trackingServer.listen(TRACKING_PORT + 1, '127.0.0.1');
-    } else {
-      console.error('Tracking server error:', err);
+// ============================================================
+// Real-time data change notifications (renderer push)
+// ============================================================
+const WRITE_CHANNELS = new Set([
+  'contacts:add', 'contacts:addBulk', 'contacts:update', 'contacts:delete',
+  'contacts:deleteByVerification', 'contacts:addTagBulk',
+  'campaigns:add', 'campaigns:update', 'campaigns:delete', 'campaigns:schedule', 'campaigns:cancelSchedule',
+  'templates:add', 'templates:update', 'templates:delete', 'templates:saveBlocks', 'templates:importFile',
+  'lists:add', 'lists:update', 'lists:delete',
+  'tags:add', 'tags:delete',
+  'blacklist:add', 'blacklist:addBulk', 'blacklist:remove', 'blacklist:import', 'bounces:autoBlacklist',
+  'unsubscribes:add', 'unsubscribes:remove',
+  'smtpAccounts:add', 'smtpAccounts:update', 'smtpAccounts:delete',
+  'smtp:save',
+  'settings:save', 'settings:saveWarmup', 'settings:saveDeliverability', 'settings:importAll',
+  'email:send', 'email:pause', 'email:resume', 'email:stop',
+  'verify:bulk',
+  'tracking:addEvent',
+  'warmup:create', 'warmup:update', 'warmup:delete', 'warmup:autoGenerate',
+  'segments:add', 'segments:update', 'segments:delete',
+  'retry:clear',
+  'spam:addReplacement', 'spam:updateReplacement', 'spam:deleteReplacement',
+  'ai:saveSettings'
+]);
+
+function getChannelDataTypes(channel) {
+  const types = new Set();
+
+  if (
+    channel.startsWith('contacts:') ||
+    channel.startsWith('tags:') ||
+    channel.startsWith('lists:') ||
+    channel.startsWith('segments:') ||
+    channel.startsWith('verify:')
+  ) {
+    types.add('contacts');
+  }
+
+  if (
+    channel.startsWith('campaigns:') ||
+    channel.startsWith('email:') ||
+    channel.startsWith('tracking:') ||
+    channel.startsWith('retry:')
+  ) {
+    types.add('campaigns');
+  }
+
+  if (channel.startsWith('templates:') || channel.startsWith('spam:')) {
+    types.add('templates');
+  }
+
+  if (
+    channel.startsWith('blacklist:') ||
+    channel.startsWith('unsubscribes:') ||
+    channel.startsWith('bounces:')
+  ) {
+    types.add('blacklist');
+  }
+
+  if (
+    channel.startsWith('smtpAccounts:') ||
+    channel.startsWith('smtp:') ||
+    channel.startsWith('settings:') ||
+    channel.startsWith('warmup:') ||
+    channel.startsWith('ai:')
+  ) {
+    types.add('settings');
+  }
+
+  if (channel === 'settings:importAll') {
+    types.add('templates');
+  }
+
+  return types.size > 0 ? Array.from(types) : ['general'];
+}
+
+function emitChannelDataChanged(channel, payload = {}) {
+  const types = getChannelDataTypes(channel);
+  for (const type of types) {
+    notifyDataChanged(type, { channel, ...payload });
+  }
+}
+
+function notifyDataChanged(type, payload = {}) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('data:changed', { type, timestamp: Date.now(), ...payload });
+  }
+}
+
+// Input validation helpers
+// NOTE: validateContactInput in ipc/validators.js is the canonical IPC-layer validator.
+// validateContact below uses a { valid, error } shape for backward compat with registerContactsHandlers.
+function validateRequired(obj, fields) {
+  if (!obj || typeof obj !== 'object') return 'Invalid input: expected an object';
+  for (const f of fields) {
+    if (obj[f] === undefined || obj[f] === null || obj[f] === '') return `Missing required field: ${f}`;
+  }
+  return null;
+}
+
+// IPC rate limiting for expensive operations
+const rateLimitMap = new Map();
+function rateLimitedHandler(channel, handler, minIntervalMs = 500) {
+  ipcMain.handle(channel, async (event, ...args) => {
+    const now = Date.now();
+    const last = rateLimitMap.get(channel) || 0;
+    if (now - last < minIntervalMs) {
+      return { error: 'Please wait before trying again', rateLimited: true };
+    }
+    rateLimitMap.set(channel, now);
+    try {
+      const result = await handler(event, ...args);
+      if (WRITE_CHANNELS.has(channel) && result && !result.error) {
+        emitChannelDataChanged(channel);
+      }
+      return result;
+    } catch (error) {
+      logger.logIpcError(channel, error, args);
+      crashReporter?.report('ipc_error', error, { channel });
+      return { error: error.message };
     }
   });
 }
 
+function safeHandler(channel, handler) {
+  ipcMain.handle(channel, async (event, ...args) => {
+    try {
+      const result = await handler(event, ...args);
+      // Auto-notify renderer of data changes after successful writes
+      if (WRITE_CHANNELS.has(channel) && result && !result.error) {
+        emitChannelDataChanged(channel);
+      }
+      return result;
+    } catch (error) {
+      logger.logIpcError(channel, error, args);
+      crashReporter?.report('ipc_error', error, { channel });
+      return { error: error.message };
+    }
+  });
+}
+
+function validateContact(contact) {
+  if (!contact || typeof contact !== 'object') return { valid: false, error: 'Invalid contact data' };
+  if (!contact.email || typeof contact.email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact.email)) {
+    return { valid: false, error: 'Invalid email address' };
+  }
+  if (contact.firstName && (typeof contact.firstName !== 'string' || contact.firstName.length > 100)) {
+    return { valid: false, error: 'Invalid first name' };
+  }
+  if (contact.lastName && (typeof contact.lastName !== 'string' || contact.lastName.length > 100)) {
+    return { valid: false, error: 'Invalid last name' };
+  }
+  if (contact.company && (typeof contact.company !== 'string' || contact.company.length > 100)) {
+    return { valid: false, error: 'Invalid company' };
+  }
+  if (contact.phone && (typeof contact.phone !== 'string' || contact.phone.length > 20)) {
+    return { valid: false, error: 'Invalid phone' };
+  }
+  return { valid: true };
+}
+
+function registerAllHandlers() {
+  // ---------- Window Controls ----------
+  safeHandler('window:minimize', () => mainWindow?.minimize());
+  safeHandler('window:maximize', () => {
+    if (mainWindow?.isMaximized()) { mainWindow.unmaximize(); }
+    else { mainWindow?.maximize(); }
+  });
+  safeHandler('window:close', () => mainWindow?.close());
+  safeHandler('window:hide', () => mainWindow?.hide());
+  safeHandler('window:show', () => { mainWindow?.show(); mainWindow?.focus(); });
+  safeHandler('window:quit', () => { app.isQuitting = true; cleanup(); app.quit(); });
+
+  registerContactsHandlers({
+    safeHandler,
+    db,
+    dialog,
+    fs,
+    path,
+    validateContact,
+    getMainWindow: () => mainWindow
+  });
+  registerDataHandlers({
+    safeHandler,
+    db,
+    dialog,
+    fs,
+    getMainWindow: () => mainWindow
+  });
+
+  // ---------- Templates ----------
+  registerContentHandlers({
+    safeHandler,
+    db,
+    dialog,
+    fs,
+    path,
+    getMainWindow: () => mainWindow
+  });
+
+  registerSmtpHandlers({
+    safeHandler,
+    db,
+    emailService,
+    decryptSmtpAccount,
+    encryptPassword,
+    validateRequired,
+    getPrimarySmtpAccount
+  });
+
+  registerCampaignHandlers({
+    safeHandler,
+    db,
+    validateRequired,
+    scheduledCampaignTimers,
+    scheduleNextCampaign
+  });
+
+  registerMessagingHandlers({
+    safeHandler,
+    rateLimitedHandler,
+    db,
+    emailService,
+    verificationService,
+    decryptSmtpAccount,
+    logger,
+    getMainWindow: () => mainWindow
+  });
+
+  registerSupportHandlers({
+    safeHandler,
+    db,
+    spamService,
+    aiService,
+    decryptPassword,
+    encryptPassword
+  });
+
+  registerSettingsHandlers({
+    safeHandler,
+    db,
+    dialog,
+    fs,
+    encryptPassword,
+    decryptSmtpAccount,
+    syncTrackingBaseUrl,
+    domainHealthService,
+    getConfiguredDkimSelectors,
+    emailService,
+    getMainWindow: () => mainWindow
+  });
+
+  registerOperationsHandlers({
+    safeHandler,
+    db,
+    decryptPassword,
+    domainHealthService,
+    getConfiguredDkimSelectors
+  });
+
+  registerBackupHandlers({
+    safeHandler,
+    db,
+    dialog,
+    fs,
+    app,
+    logger,
+    emailService,
+    cleanup,
+    dbPath,
+    logDir,
+    getMainWindow: () => mainWindow
+  });
+}
+
+// ============================================================
+// App Lifecycle
+// ============================================================
 app.whenReady().then(async () => {
   await initializeServices();
+  registerAllHandlers();
   createWindow();
+  createTray();
+
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow();
+    }
   });
+}).catch((err) => {
+  try { logger?.error('Startup failed', { message: err.message, stack: err.stack }); } catch (e) {}
+  dialog.showErrorBox('Startup Error', `Bulky failed to start: ${err.message}\n\nPlease restart the application.`);
+  app.quit();
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    if (trackingServer) trackingServer.close();
-    if (db) db.close();
+  // On Windows/Linux the app stays alive in the system tray when the
+  // window is closed — only quit when the user explicitly chooses Quit
+  // from the tray context menu (app.isQuitting = true).
+  if (process.platform !== 'darwin' && app.isQuitting) {
+    cleanup();
     app.quit();
   }
 });
 
-// ==================== WINDOW CONTROLS ====================
-ipcMain.handle('window:minimize', () => mainWindow.minimize());
-ipcMain.handle('window:maximize', () => {
-  if (mainWindow.isMaximized()) mainWindow.unmaximize();
-  else mainWindow.maximize();
-});
-ipcMain.handle('window:close', () => mainWindow.close());
-
-// ==================== CONTACTS ====================
-ipcMain.handle('contacts:getAll', async () => db.getAllContacts());
-ipcMain.handle('contacts:getFiltered', async (event, filter) => db.getContactsByFilter(filter));
-ipcMain.handle('contacts:add', async (event, contact) => db.addContact(contact));
-ipcMain.handle('contacts:addBulk', async (event, contacts) => db.addBulkContacts(contacts));
-ipcMain.handle('contacts:update', async (event, contact) => db.updateContact(contact));
-ipcMain.handle('contacts:delete', async (event, ids) => db.deleteContacts(ids));
-ipcMain.handle('contacts:deleteByVerification', async (event, status) => db.deleteContactsByVerification(status));
-ipcMain.handle('contacts:getRecipientCount', async (event, filter) => db.getRecipientCount(filter));
-ipcMain.handle('contacts:getForCampaign', async (event, filter) => db.getContactsForCampaign(filter));
-
-
-// Contact Import (multiple formats) - FULL SERVER-SIDE PARSING
-ipcMain.handle('contacts:import', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ['openFile'],
-    filters: [
-      { name: 'All Supported', extensions: ['csv', 'txt', 'xlsx', 'xls', 'json', 'pdf', 'docx', 'doc'] },
-      { name: 'CSV Files', extensions: ['csv'] },
-      { name: 'Text Files', extensions: ['txt'] },
-      { name: 'Excel Files', extensions: ['xlsx', 'xls'] },
-      { name: 'JSON Files', extensions: ['json'] },
-      { name: 'PDF Files', extensions: ['pdf'] },
-      { name: 'Word Files', extensions: ['docx', 'doc'] }
-    ]
-  });
-
-  if (!result.canceled && result.filePaths.length > 0) {
-    const filePath = result.filePaths[0];
-    const ext = path.extname(filePath).toLowerCase();
-    let parsed = [];
-    
-    // Email extraction regex
-    const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-    
-    // Extract emails from raw text (for PDF, Word, or unstructured TXT)
-    const extractEmailsFromText = (text) => {
-      const emails = text.match(emailRegex) || [];
-      const unique = [...new Set(emails.map(e => e.toLowerCase()))];
-      return unique.map(email => ({ email, firstName: '', lastName: '', company: '', phone: '' }));
-    };
-
-    try {
-      // CSV Parsing helper
-      const parseCSVLine = (line) => {
-        const cols = [];
-        let current = '';
-        let inQuotes = false;
-        for (let i = 0; i < line.length; i++) {
-          const char = line[i];
-          if (char === '"') inQuotes = !inQuotes;
-          else if ((char === ',' || char === ';' || char === '\t') && !inQuotes) {
-            cols.push(current.trim().replace(/^"|"$/g, ''));
-            current = '';
-          } else current += char;
-        }
-        cols.push(current.trim().replace(/^"|"$/g, ''));
-        return cols;
-      };
-
-      // Check if header is a date/time column (to skip for name/company fields)
-      const isDateColumn = (h) => {
-        const datePatterns = ['date', 'time', 'created', 'updated', 'modified', 'timestamp', '_at', 'registered', 'joined', 'added', 'subscribed'];
-        return datePatterns.some(p => h.includes(p));
-      };
-      
-      // Check if a value looks like a timestamp/date
-      const isDateValue = (val) => {
-        if (!val) return false;
-        // ISO date pattern: 2025-12-12T20:37:17 or similar
-        if (/^\d{4}-\d{2}-\d{2}/.test(val)) return true;
-        // Other common date formats
-        if (/^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(val)) return true;
-        if (/^\d{1,2}-\d{1,2}-\d{2,4}/.test(val)) return true;
-        return false;
-      };
-      
-      // Clean value - return empty string if it's a date/timestamp
-      const cleanValue = (val) => {
-        if (!val) return '';
-        const trimmed = val.trim();
-        if (isDateValue(trimmed)) return '';
-        return trimmed;
-      };
-
-      const findColumnIndex = (headers, patterns) => headers.findIndex(h => patterns.some(p => h.includes(p)) && !isDateColumn(h));
-
-      // CSV / TXT files
-      if (ext === '.csv' || ext === '.txt') {
-        const content = fs.readFileSync(filePath, 'utf-8');
-        const lines = content.split(/[\r\n]+/).filter(l => l.trim());
-        
-        // Check if it's structured (has headers) or raw text
-        const firstLine = lines[0] || '';
-        const hasHeaders = firstLine.toLowerCase().includes('email') || firstLine.includes('@') === false;
-        
-        if (hasHeaders && lines.length >= 2) {
-          const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase());
-          const emailIdx = findColumnIndex(headers, ['email', 'e-mail', 'emailaddress']);
-          const fnameIdx = findColumnIndex(headers, ['first', 'fname', 'firstname', 'given']);
-          const lnameIdx = findColumnIndex(headers, ['last', 'lname', 'lastname', 'surname', 'family']);
-          const companyIdx = findColumnIndex(headers, ['company', 'org', 'organization', 'business']);
-          const phoneIdx = findColumnIndex(headers, ['phone', 'mobile', 'tel', 'cell']);
-          
-          for (let i = 1; i < lines.length; i++) {
-            const cols = parseCSVLine(lines[i]);
-            const email = (cols[emailIdx >= 0 ? emailIdx : 0] || '').trim().toLowerCase();
-            if (email && email.includes('@') && !email.includes(' ')) {
-              parsed.push({
-                email,
-                firstName: fnameIdx >= 0 ? cleanValue(cols[fnameIdx]) : '',
-                lastName: lnameIdx >= 0 ? cleanValue(cols[lnameIdx]) : '',
-                company: companyIdx >= 0 ? cleanValue(cols[companyIdx]) : '',
-                phone: phoneIdx >= 0 ? cleanValue(cols[phoneIdx]) : ''
-              });
-            }
-          }
-        } else {
-          // Raw text - just extract emails
-          parsed = extractEmailsFromText(content);
-        }
-      }
-      // JSON files
-      else if (ext === '.json') {
-        const content = fs.readFileSync(filePath, 'utf-8');
-        const json = JSON.parse(content);
-        const arr = Array.isArray(json) ? json : json.contacts || json.data || json.users || [];
-        parsed = arr.filter(c => c.email).map(c => ({
-          email: (c.email || '').toLowerCase(),
-          firstName: c.firstName || c.first_name || c.fname || (c.name ? c.name.split(' ')[0] : '') || '',
-          lastName: c.lastName || c.last_name || c.lname || (c.name ? c.name.split(' ').slice(1).join(' ') : '') || '',
-          company: c.company || c.organization || c.org || '',
-          phone: c.phone || c.mobile || c.tel || ''
-        }));
-      }
-      // Excel files
-      else if (ext === '.xlsx' || ext === '.xls') {
-        const workbook = XLSX.readFile(filePath);
-        const sheetName = workbook.SheetNames[0];
-        const sheet = workbook.Sheets[sheetName];
-        const data = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-        
-        if (data.length >= 1) {
-          const headers = data[0].map(h => String(h || '').toLowerCase());
-          const emailIdx = findColumnIndex(headers, ['email', 'e-mail', 'emailaddress']);
-          const fnameIdx = findColumnIndex(headers, ['first', 'fname', 'firstname', 'given']);
-          const lnameIdx = findColumnIndex(headers, ['last', 'lname', 'lastname', 'surname', 'family']);
-          const companyIdx = findColumnIndex(headers, ['company', 'org', 'organization', 'business']);
-          const phoneIdx = findColumnIndex(headers, ['phone', 'mobile', 'tel', 'cell']);
-          
-          for (let i = 1; i < data.length; i++) {
-            const row = data[i];
-            const email = String(row[emailIdx >= 0 ? emailIdx : 0] || '').trim().toLowerCase();
-            if (email && email.includes('@') && !email.includes(' ')) {
-              parsed.push({
-                email,
-                firstName: fnameIdx >= 0 ? cleanValue(String(row[fnameIdx] || '')) : '',
-                lastName: lnameIdx >= 0 ? cleanValue(String(row[lnameIdx] || '')) : '',
-                company: companyIdx >= 0 ? cleanValue(String(row[companyIdx] || '')) : '',
-                phone: phoneIdx >= 0 ? cleanValue(String(row[phoneIdx] || '')) : ''
-              });
-            }
-          }
-        }
-      }
-      // PDF files
-      else if (ext === '.pdf') {
-        const pdfText = await parsePdfForEmails(filePath);
-        parsed = extractEmailsFromText(pdfText);
-      }
-      // Word files (.docx)
-      else if (ext === '.docx') {
-        const result = await mammoth.extractRawText({ path: filePath });
-        parsed = extractEmailsFromText(result.value);
-      }
-      // Old Word files (.doc) - try as text
-      else if (ext === '.doc') {
-        try {
-          const content = fs.readFileSync(filePath, 'utf-8');
-          parsed = extractEmailsFromText(content);
-        } catch (e) {
-          return { success: false, error: 'Cannot read old .doc format. Please convert to .docx' };
-        }
-      }
-
-      if (parsed.length === 0) return { success: false, error: 'No valid email addresses found in file' };
-      
-      return { success: true, contacts: parsed, filePath, extension: ext, count: parsed.length };
-    } catch (error) {
-      return { success: false, error: 'Failed to parse file: ' + error.message };
-    }
-  }
-  return { success: false };
+app.on('before-quit', () => {
+  cleanup();
 });
 
-// ==================== TAGS ====================
-ipcMain.handle('tags:getAll', async () => db.getAllTags());
-ipcMain.handle('tags:add', async (event, tag) => db.addTag(tag));
-ipcMain.handle('tags:delete', async (event, id) => db.deleteTag(id));
+let cleanupDone = false;
+function cleanup() {
+  if (cleanupDone) return;
+  cleanupDone = true;
 
-// ==================== LISTS ====================
-ipcMain.handle('lists:getAll', async () => db.getAllLists());
-ipcMain.handle('lists:add', async (event, list) => db.addList(list));
-ipcMain.handle('lists:update', async (event, list) => db.updateList(list));
-ipcMain.handle('lists:delete', async (event, id) => db.deleteList(id));
-ipcMain.handle('lists:getContacts', async (event, listId) => db.getContactsByList(listId));
+  logger?.info('Application shutting down - starting cleanup');
 
-// ==================== BLACKLIST ====================
-ipcMain.handle('blacklist:getAll', async () => db.getAllBlacklist());
-ipcMain.handle('blacklist:add', async (event, entry) => db.addToBlacklist(entry));
-ipcMain.handle('blacklist:addBulk', async (event, entries) => db.addBulkToBlacklist(entries));
-ipcMain.handle('blacklist:remove', async (event, id) => db.removeFromBlacklist(id));
-ipcMain.handle('blacklist:check', async (event, email) => ({ isBlacklisted: db.isBlacklisted(email) }));
-
-// Import blacklist from file
-ipcMain.handle('blacklist:import', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ['openFile'],
-    filters: [{ name: 'Text/CSV', extensions: ['csv', 'txt'] }]
-  });
-
-  if (!result.canceled && result.filePaths.length > 0) {
-    const content = fs.readFileSync(result.filePaths[0], 'utf-8');
-    const emails = content.split(/[\r\n,;]+/).map(e => e.trim()).filter(e => e && e.includes('@'));
-    const added = db.addBulkToBlacklist(emails, 'import');
-    return { success: true, ...added, total: emails.length };
-  }
-  return { success: false };
-});
-
-// ==================== UNSUBSCRIBES ====================
-ipcMain.handle('unsubscribes:getAll', async () => db.getAllUnsubscribes());
-ipcMain.handle('unsubscribes:add', async (event, { email, campaignId, reason }) => db.addUnsubscribe(email, campaignId, reason));
-ipcMain.handle('unsubscribes:remove', async (event, email) => db.removeUnsubscribe(email));
-ipcMain.handle('unsubscribes:check', async (event, email) => ({ isUnsubscribed: db.isUnsubscribed(email) }));
-
-// ==================== TEMPLATES ====================
-ipcMain.handle('templates:getAll', async () => db.getAllTemplates());
-ipcMain.handle('templates:getByCategory', async (event, category) => db.getTemplatesByCategory(category));
-ipcMain.handle('templates:add', async (event, template) => db.addTemplate(template));
-ipcMain.handle('templates:update', async (event, template) => db.updateTemplate(template));
-ipcMain.handle('templates:delete', async (event, id) => db.deleteTemplate(id));
-
-// ==================== SMTP ACCOUNTS (Multiple) ====================
-ipcMain.handle('smtpAccounts:getAll', async () => db.getAllSmtpAccounts());
-ipcMain.handle('smtpAccounts:getActive', async () => db.getActiveSmtpAccounts());
-ipcMain.handle('smtpAccounts:add', async (event, account) => db.addSmtpAccount(account));
-ipcMain.handle('smtpAccounts:update', async (event, account) => db.updateSmtpAccount(account));
-ipcMain.handle('smtpAccounts:delete', async (event, id) => db.deleteSmtpAccount(id));
-ipcMain.handle('smtpAccounts:test', async (event, account) => emailService.testConnection(account));
-
-// Legacy SMTP settings
-ipcMain.handle('smtp:get', async () => db.getSmtpSettings());
-ipcMain.handle('smtp:save', async (event, settings) => db.saveSmtpSettings(settings));
-ipcMain.handle('smtp:test', async (event, settings) => emailService.testConnection(settings));
-
-
-// ==================== CAMPAIGNS ====================
-ipcMain.handle('campaigns:getAll', async () => db.getAllCampaigns());
-ipcMain.handle('campaigns:getScheduled', async () => db.getScheduledCampaigns());
-ipcMain.handle('campaigns:add', async (event, campaign) => db.addCampaign(campaign));
-ipcMain.handle('campaigns:update', async (event, campaign) => db.updateCampaign(campaign));
-ipcMain.handle('campaigns:delete', async (event, id) => db.deleteCampaign(id));
-ipcMain.handle('campaigns:getLogs', async (event, campaignId) => db.getCampaignLogs(campaignId));
-ipcMain.handle('campaigns:getAnalytics', async (event, campaignId) => db.getCampaignAnalytics(campaignId));
-ipcMain.handle('campaigns:schedule', async (event, { campaignId, scheduledAt, timezone }) => 
-  db.scheduleCampaign(campaignId, scheduledAt, timezone));
-ipcMain.handle('campaigns:cancelSchedule', async (event, campaignId) => db.cancelScheduledCampaign(campaignId));
-
-// ==================== EMAIL SENDING ====================
-ipcMain.handle('email:send', async (event, { campaign, contacts, settings }) => {
-  return emailService.sendCampaign(campaign, contacts, settings, (progress) => {
-    mainWindow.webContents.send('email:progress', progress);
-  });
-});
-ipcMain.handle('email:pause', async () => emailService.pause());
-ipcMain.handle('email:resume', async () => emailService.resume());
-ipcMain.handle('email:stop', async () => emailService.stop());
-
-// ==================== EMAIL VERIFICATION ====================
-ipcMain.handle('verify:email', async (event, email) => verificationService.verifyEmail(email));
-ipcMain.handle('verify:bulk', async (event, emails) => {
-  return verificationService.verifyBulk(emails, (progress) => {
-    mainWindow.webContents.send('verify:progress', progress);
-  });
-});
-
-// ==================== SPAM CHECK & AUTO-FIX ====================
-ipcMain.handle('spam:check', async (event, { subject, content }) => spamService.analyzeContent(subject, content));
-ipcMain.handle('spam:autoFix', async (event, { subject, content, issues }) => spamService.autoFix(subject, content, issues));
-ipcMain.handle('spam:getSuggestions', async (event, word) => spamService.getSuggestions(word));
-ipcMain.handle('spam:getReplacements', async () => db.getAllSpamReplacements());
-ipcMain.handle('spam:addReplacement', async (event, item) => db.addSpamReplacement(item));
-ipcMain.handle('spam:updateReplacement', async (event, item) => db.updateSpamReplacement(item));
-ipcMain.handle('spam:deleteReplacement', async (event, id) => db.deleteSpamReplacement(id));
-
-// ==================== TRACKING ====================
-ipcMain.handle('tracking:addEvent', async (event, trackingEvent) => db.addTrackingEvent(trackingEvent));
-ipcMain.handle('tracking:getEvents', async (event, campaignId) => db.getTrackingEvents(campaignId));
-
-// ==================== APP SETTINGS ====================
-ipcMain.handle('settings:get', async () => db.getSettings());
-ipcMain.handle('settings:save', async (event, settings) => db.saveSettings(settings));
-
-// ==================== STATISTICS ====================
-ipcMain.handle('stats:getDashboard', async () => db.getDashboardStats());
-
-// ==================== EXPORT ====================
-ipcMain.handle('export:contacts', async (event, contacts) => {
-  const result = await dialog.showSaveDialog(mainWindow, {
-    defaultPath: 'contacts.csv',
-    filters: [{ name: 'CSV Files', extensions: ['csv'] }]
-  });
-
-  if (!result.canceled) {
-    const headers = 'email,firstName,lastName,company,listName,status,verified,engagementScore,createdAt\n';
-    const rows = contacts.map(c => 
-      `${c.email},${c.firstName || ''},${c.lastName || ''},${c.company || ''},${c.listName || ''},${c.status},${c.verified},${c.engagementScore || 0},${c.createdAt}`
-    ).join('\n');
-    
-    fs.writeFileSync(result.filePath, headers + rows);
-    return { success: true, filePath: result.filePath };
-  }
-  return { success: false };
-});
-
-ipcMain.handle('export:logs', async (event, logs) => {
-  const result = await dialog.showSaveDialog(mainWindow, {
-    defaultPath: 'campaign_logs.csv',
-    filters: [{ name: 'CSV Files', extensions: ['csv'] }]
-  });
-
-  if (!result.canceled) {
-    const headers = 'email,status,variant,sentAt,error\n';
-    const rows = logs.map(l => `${l.email},${l.status},${l.variant || 'A'},${l.sentAt},${l.error || ''}`).join('\n');
-    fs.writeFileSync(result.filePath, headers + rows);
-    return { success: true, filePath: result.filePath };
-  }
-  return { success: false };
-});
-
-ipcMain.handle('export:blacklist', async (event) => {
-  const blacklist = db.getAllBlacklist();
-  const result = await dialog.showSaveDialog(mainWindow, {
-    defaultPath: 'blacklist.csv',
-    filters: [{ name: 'CSV Files', extensions: ['csv'] }]
-  });
-
-  if (!result.canceled) {
-    const headers = 'email,domain,reason,source,createdAt\n';
-    const rows = blacklist.map(b => `${b.email || ''},${b.domain || ''},${b.reason || ''},${b.source},${b.createdAt}`).join('\n');
-    fs.writeFileSync(result.filePath, headers + rows);
-    return { success: true, filePath: result.filePath };
-  }
-  return { success: false };
-});
-
-ipcMain.handle('export:verificationResults', async (event, results) => {
-  const result = await dialog.showSaveDialog(mainWindow, {
-    defaultPath: 'verification_results.csv',
-    filters: [{ name: 'CSV Files', extensions: ['csv'] }]
-  });
-
-  if (!result.canceled) {
-    const headers = 'email,status,score,reason\n';
-    const rows = results.map(r => `${r.email},${r.status},${r.score},${r.reason || ''}`).join('\n');
-    fs.writeFileSync(result.filePath, headers + rows);
-    return { success: true, filePath: result.filePath };
-  }
-  return { success: false };
-});
-
-// ==================== BACKUP & RESTORE ====================
-ipcMain.handle('backup:create', async () => {
-  const result = await dialog.showSaveDialog(mainWindow, {
-    defaultPath: `bulky_backup_${new Date().toISOString().split('T')[0]}.db`,
-    filters: [{ name: 'Database Backup', extensions: ['db'] }]
-  });
-
-  if (!result.canceled) {
-    try {
-      // Export the database to a file
-      const data = db.db.export();
-      const buffer = Buffer.from(data);
-      fs.writeFileSync(result.filePath, buffer);
-      return { success: true, filePath: result.filePath };
-    } catch (error) {
-      return { success: false, error: error.message };
-    }
-  }
-  return { success: false, canceled: true };
-});
-
-ipcMain.handle('backup:restore', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ['openFile'],
-    filters: [{ name: 'Database Backup', extensions: ['db'] }]
-  });
-
-  if (!result.canceled && result.filePaths.length > 0) {
-    try {
-      const backupPath = result.filePaths[0];
-      const buffer = fs.readFileSync(backupPath);
-      
-      // Close current database
-      db.close();
-      
-      // Write backup to the actual database path
-      fs.writeFileSync(dbPath, buffer);
-      
-      // Reinitialize database
-      const BulkyDatabase = require('./database/db');
-      db = new BulkyDatabase(dbPath);
-      await db.init();
-      
-      // Reinitialize services with new db
-      emailService = new EmailService(db);
-      spamService = new SpamService(db);
-      
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: error.message };
-    }
-  }
-  return { success: false, canceled: true };
-});
-
-ipcMain.handle('backup:getInfo', async () => {
   try {
-    const stats = fs.statSync(dbPath);
-    return {
-      size: (stats.size / 1024).toFixed(2) + ' KB',
-      lastModified: stats.mtime.toLocaleString(),
-      path: dbPath
-    };
-  } catch (error) {
-    return { size: 'Unknown', lastModified: 'Unknown', path: dbPath };
+    // Clear scheduled timers
+    for (const timer of scheduledCampaignTimers.values()) {
+      clearTimeout(timer);
+    }
+    scheduledCampaignTimers.clear();
+
+    // Stop intervals
+    if (autoBackupInterval) clearInterval(autoBackupInterval);
+    if (retryInterval) clearInterval(retryInterval);
+    if (memMonitorInterval) clearInterval(memMonitorInterval);
+    if (serviceHealthInterval) clearInterval(serviceHealthInterval);
+
+    // Close tracking server
+    if (trackingServer) {
+      trackingServer.close();
+    }
+
+    emailService?.dispose?.();
+
+    // Flush database
+    if (db) {
+      db.dispose?.();
+    }
+
+    // Final stability report
+    logger?.info('Shutdown stability report', stabilityMetrics);
+
+    logger?.info('Cleanup completed');
+  } catch (e) {
+    console.error('Cleanup error:', e.message);
   }
-});
+}

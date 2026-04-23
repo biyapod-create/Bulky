@@ -1,9 +1,9 @@
-import React, { useState } from 'react';
-import { ShieldCheck, AlertTriangle, CheckCircle, Lightbulb, ChevronDown, ChevronUp, Wand2, Eye, Code, Search } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { ShieldCheck, AlertTriangle, CheckCircle, Lightbulb, ChevronDown, ChevronUp, Wand2, Eye, Code, Search, FileText } from 'lucide-react';
 import { useToast } from '../components/ToastContext';
 import Modal from '../components/Modal';
 
-function SpamChecker() {
+function SpamChecker({ isActive }) {
   const { addToast } = useToast();
   const [subject, setSubject] = useState('');
   const [content, setContent] = useState('');
@@ -13,6 +13,47 @@ function SpamChecker() {
   const [showTips, setShowTips] = useState(false);
   const [showFixModal, setShowFixModal] = useState(false);
   const [selectedFixes, setSelectedFixes] = useState({});
+  const [templates, setTemplates] = useState([]);
+
+  const loadTemplates = useCallback(async () => {
+    try {
+      if (window.electron?.templates?.getAll) {
+        const data = await window.electron.templates.getAll();
+        setTemplates(Array.isArray(data) ? data : []);
+      }
+    } catch (err) {
+      console.warn('SpamChecker loadTemplates:', err?.message);
+    }
+  }, []);
+
+  // Initial load
+  useEffect(() => { loadTemplates(); }, [loadTemplates]);
+
+  // Refresh when tab becomes active so new templates appear immediately
+  useEffect(() => {
+    if (isActive) loadTemplates();
+  }, [isActive, loadTemplates]);
+
+  // React to template mutations from other pages
+  useEffect(() => {
+    if (!window.electron?.onDataChanged) return;
+    const unsub = window.electron.onDataChanged((data) => {
+      if (data.type === 'templates') loadTemplates();
+    });
+    return unsub;
+  }, [loadTemplates]);
+
+  const handleTemplateSelect = (e) => {
+    const templateId = e.target.value;
+    if (!templateId) return;
+    const template = templates.find(t => String(t.id) === templateId);
+    if (template) {
+      setSubject(template.subject || template.name || '');
+      setContent(template.content || template.html || template.body || '');
+      setResult(null);
+      addToast(`Loaded template: ${template.name}`, 'success');
+    }
+  };
 
   const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -59,7 +100,6 @@ function SpamChecker() {
         addToast('No spam issues found! Score: 100/100', 'success');
       }
     } catch (error) {
-      console.error('Analysis error:', error);
       addToast('Analysis failed: ' + (error.message || 'Unknown error'), 'error');
     } finally {
       setIsChecking(false);
@@ -177,7 +217,46 @@ function SpamChecker() {
         {/* Left: Editor */}
         <div className="card" style={{ overflow: 'hidden' }}>
           <h3 className="card-title mb-4"><Code size={18} /> Email Editor</h3>
-          
+
+          {/* Template Selector */}
+          <div className="form-group">
+            <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <FileText size={14} /> Load from Template
+            </label>
+            {templates.length > 0 ? (
+              <div style={{ display: 'flex', gap: '8px', overflowX: 'auto', paddingBottom: '8px' }}>
+                {templates.map(t => (
+                  <div
+                    key={t.id}
+                    onClick={() => handleTemplateSelect({ target: { value: String(t.id) } })}
+                    style={{
+                      minWidth: '160px',
+                      maxWidth: '200px',
+                      padding: '10px 12px',
+                      borderRadius: '8px',
+                      border: `1px solid ${subject && content && templates.find(tp => tp.content === content)?.id === t.id ? 'var(--accent)' : 'var(--border)'}`,
+                      background: subject && content && templates.find(tp => tp.content === content)?.id === t.id ? 'var(--accent-dim)' : 'var(--bg-tertiary)',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s',
+                      flexShrink: 0
+                    }}
+                  >
+                    <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text)', marginBottom: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {t.name || `Template #${t.id}`}
+                    </div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {t.subject || 'No subject'}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ padding: '12px', borderRadius: '8px', background: 'var(--bg-tertiary)', color: 'var(--text-muted)', fontSize: '13px', textAlign: 'center' }}>
+                No templates saved yet. Create templates in the Templates page.
+              </div>
+            )}
+          </div>
+
           <div className="form-group">
             <label className="form-label">Subject Line</label>
             <input 
@@ -313,6 +392,15 @@ function SpamChecker() {
         </div>
       </div>
 
+
+      {/* Empty State */}
+      {!result && !isChecking && (
+        <div className="card mt-4" style={{ textAlign: 'center', padding: '3rem 2rem', color: 'var(--text-muted)' }}>
+          <ShieldCheck size={48} style={{ margin: '0 auto 1rem', opacity: 0.3 }} />
+          <p style={{ fontSize: '15px' }}>Paste your email content above and click "Check for Spam Triggers" to analyze</p>
+          <p style={{ fontSize: '13px', marginTop: '0.5rem' }}>We'll check for spam words, header issues, formatting problems, and more</p>
+        </div>
+      )}
 
       {/* Results Section */}
       {result && (

@@ -1,10 +1,40 @@
-const dns = require('dns').promises;
+const dns = require('dns');
 const net = require('net');
 
 class VerificationService {
-  constructor() {
+  constructor(options = {}) {
     this.emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
-    
+    this._systemDns = options.systemDns || dns.promises;
+    this._publicDns = options.publicDns || null;
+    this._publicDnsServers = options.publicDnsServers || ['1.1.1.1', '8.8.8.8'];
+    this._recoverableDnsErrorCodes = new Set([
+      'ECONNREFUSED',
+      'EDESTRUCTION',
+      'ETIMEOUT',
+      'EAI_AGAIN',
+      'ESERVFAIL',
+      'EREFUSED',
+      'SERVFAIL',
+      'REFUSED'
+    ]);
+
+    // Pause/resume/stop state for bulk verification
+    this._isPaused = false;
+    this._isStopped = false;
+
+    // Configurable timeouts
+    this.defaultTimeout = 15000;    // 15 seconds for SMTP checks
+    this.catchAllTimeout = 10000;   // 10 seconds for catch-all checks
+    this.greylistRetryDelay = 3000; // 3 seconds before greylisting retry
+    this.greylistMaxRetries = 1;    // Reduce retries to avoid excessive waits
+
+    // Concurrency for bulk verification
+    this.concurrency = 3; // Reduced from 5 to avoid connection flooding
+
+    // Domain-level cache for MX lookups, catch-all status, inbox provider
+    this._domainCache = new Map();
+    this._domainCacheTTL = 10 * 60 * 1000; // 10 minutes
+
     // Expanded disposable email domains (500+ common ones)
     this.disposableDomains = new Set([
       // Major disposable services
@@ -236,7 +266,16 @@ class VerificationService {
       'ypmail.webarnak.fr.eu.org', 'yuurok.com', 'zehnminuten.de',
       'zehnminutenmail.de', 'zetmail.com', 'zippymail.info',
       'zoaxe.com', 'zoemail.com', 'zoemail.net',
-      'zoemail.org', 'zomg.info', 'zxcv.com', 'zxcvbnm.com', 'zzz.com'
+      'zoemail.org', 'zomg.info', 'zxcv.com', 'zxcvbnm.com', 'zzz.com',
+      // Additional disposable domains
+      'burnermail.io', 'inboxbear.com', 'mailsac.com', 'mailtrap.io',
+      'receiveee.com', 'temp-mail.de', 'tempemailco.com', 'tempinbox.me',
+      'throwmail.com', 'trashbox.me', 'wegwerfmail.org', 'yomail.info',
+      'crapmail.org', 'dayrep.com', 'discard.email', 'dropmail.me',
+      'emailfake.com', 'emkei.cz', 'fakermail.com', 'guerrilla.ml',
+      'harakirimail.com', 'inboxkitten.com', 'koszmail.pl', 'mailforspam.com',
+      'mailhero.io', 'mailseal.de', 'nospam.wins.com.br', 'reddcoin2.com',
+      'spamgourmet.org', 'tempsky.com', 'trashinbox.com', 'veryday.ch'
     ]);
 
     // Common role-based prefixes (often not real people)
@@ -269,6 +308,106 @@ class VerificationService {
       553: { status: 'invalid', meaning: 'Mailbox name not allowed' },
       554: { status: 'invalid', meaning: 'Transaction failed' }
     };
+
+    // Inbox provider detection patterns based on MX records
+    this._inboxProviderPatterns = {
+      'Gmail': [/google\.com$/i, /googlemail\.com$/i, /smtp\.google\.com$/i, /gmail-smtp/i],
+      'Outlook/Microsoft 365': [/outlook\.com$/i, /microsoft\.com$/i, /protection\.outlook\.com$/i, /hotmail\.com$/i, /office365/i],
+      'Yahoo': [/yahoodns\.net$/i, /yahoo\.com$/i, /yahoomail\.com$/i],
+      'Zoho': [/zoho\.com$/i, /zohomail\.com$/i],
+      'ProtonMail': [/protonmail\.ch$/i, /proton\.me$/i],
+      'iCloud': [/icloud\.com$/i, /apple\.com$/i, /me\.com$/i],
+      'AOL': [/aol\.com$/i, /aim\.com$/i],
+      'GoDaddy': [/secureserver\.net$/i, /godaddy\.com$/i],
+      'Rackspace': [/emailsrvr\.com$/i, /rackspace\.com$/i],
+      'Fastmail': [/fastmail\.com$/i, /messagingengine\.com$/i],
+      'Yandex': [/yandex\.(ru|com|net)$/i],
+      'Amazon SES': [/amazonaws\.com$/i, /amazon\.com$/i],
+      'Namecheap': [/registrar-servers\.com$/i, /namecheap/i],
+      'Bluehost': [/bluehost\.com$/i],
+      'HostGator': [/hostgator\.com$/i],
+      'OVH': [/ovh\.(net|com)$/i],
+      'Mimecast': [/mimecast\.com$/i],
+      'Barracuda': [/barracuda/i],
+      'Postmark': [/postmarkapp\.com$/i],
+      'SendGrid': [/sendgrid\.(net|com)$/i],
+      'Mailgun': [/mailgun\.org$/i]
+    };
+  }
+
+  // Get cached domain data or return null
+  _getCachedDomain(domain) {
+    const cached = this._domainCache.get(domain);
+    if (!cached) return null;
+    if (Date.now() - cached.timestamp > this._domainCacheTTL) {
+      this._domainCache.delete(domain);
+      return null;
+    }
+    return cached.data;
+  }
+
+  // Set domain cache
+  _setCachedDomain(domain, data) {
+    this._domainCache.set(domain, { data, timestamp: Date.now() });
+  }
+
+  _shouldFallbackDns(error) {
+    if (!error) return false;
+    if (this._recoverableDnsErrorCodes.has(error.code)) return true;
+    const message = String(error.message || '').toUpperCase();
+    return message.includes('ECONNREFUSED') || message.includes('SERVFAIL') || message.includes('REFUSED');
+  }
+
+  async _resolveDns(method, ...args) {
+    try {
+      return await this._systemDns[method](...args);
+    } catch (systemError) {
+      if (!this._shouldFallbackDns(systemError)) {
+        throw systemError;
+      }
+
+      let resolver = this._publicDns;
+      if (!resolver) {
+        resolver = new dns.promises.Resolver();
+        try {
+          resolver.setServers(this._publicDnsServers);
+        } catch (e) {}
+      }
+
+      if (typeof resolver[method] !== 'function') {
+        throw systemError;
+      }
+
+      try {
+        return await resolver[method](...args);
+      } catch (publicError) {
+        if (!this._publicDns && (publicError.code === 'EDESTRUCTION' || publicError.code === 'ETIMEOUT')) {
+          const retryResolver = new dns.promises.Resolver();
+          try {
+            retryResolver.setServers(this._publicDnsServers);
+          } catch (e) {}
+          return retryResolver[method](...args);
+        }
+        throw publicError;
+      }
+    }
+  }
+
+  async _resolveAddressRecords(domain) {
+    let lastError = null;
+    for (const method of ['resolve4', 'resolve6']) {
+      try {
+        const records = await this._resolveDns(method, domain);
+        if (Array.isArray(records) && records.length > 0) {
+          return records;
+        }
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    if (lastError) throw lastError;
+    return [];
   }
 
   validateSyntax(email) {
@@ -277,7 +416,7 @@ class VerificationService {
     }
 
     const trimmed = email.trim().toLowerCase();
-    
+
     if (!this.emailRegex.test(trimmed)) {
       return { valid: false, reason: 'Invalid email format' };
     }
@@ -287,7 +426,7 @@ class VerificationService {
     }
 
     const [localPart, domain] = trimmed.split('@');
-    
+
     if (!localPart || !domain) {
       return { valid: false, reason: 'Missing local part or domain' };
     }
@@ -300,16 +439,51 @@ class VerificationService {
   }
 
   async checkMxRecords(domain) {
+    // Check cache first
+    const cached = this._getCachedDomain(domain);
+    if (cached && cached.mxRecords) {
+      return {
+        valid: true,
+        mxRecords: cached.mxRecords,
+        primaryMx: cached.primaryMx
+      };
+    }
+
     try {
-      const records = await dns.resolveMx(domain);
+      let records = await this._resolveDns('resolveMx', domain);
       if (records && records.length > 0) {
         records.sort((a, b) => a.priority - b.priority);
-        return { 
-          valid: true, 
+        if (records.length === 1 && records[0].exchange === '' && records[0].priority === 0) {
+          return { valid: false, reason: 'Domain does not accept email (null MX)' };
+        }
+        const result = {
+          valid: true,
           mxRecords: records.map(r => r.exchange),
           primaryMx: records[0].exchange
         };
+
+        // Cache the MX records
+        const existing = this._getCachedDomain(domain) || {};
+        this._setCachedDomain(domain, { ...existing, mxRecords: result.mxRecords, primaryMx: result.primaryMx });
+
+        return result;
       }
+
+      // Fallback to A/AAAA records if no MX records exist
+      const addresses = await this._resolveAddressRecords(domain);
+      if (addresses && addresses.length > 0) {
+        const result = {
+          valid: true,
+          mxRecords: [domain],
+          primaryMx: domain
+        };
+
+        const existing = this._getCachedDomain(domain) || {};
+        this._setCachedDomain(domain, { ...existing, mxRecords: result.mxRecords, primaryMx: result.primaryMx });
+
+        return result;
+      }
+
       return { valid: false, reason: 'No MX records found' };
     } catch (error) {
       if (error.code === 'ENOTFOUND' || error.code === 'ENODATA') {
@@ -325,18 +499,109 @@ class VerificationService {
 
   checkRoleBased(localPart) {
     const lower = localPart.toLowerCase();
-    return this.roleBasedPrefixes.some(prefix => 
+    return this.roleBasedPrefixes.some(prefix =>
       lower === prefix || lower.startsWith(prefix + '.') || lower.startsWith(prefix + '_')
     );
   }
 
-  // Real SMTP mailbox verification using RCPT TO
-  async verifyMailboxSMTP(email, mxHost, timeout = 10000) {
+  // Detect inbox provider from MX records
+  detectInboxProvider(mxRecords) {
+    if (!mxRecords || mxRecords.length === 0) return 'Unknown';
+
+    for (const mx of mxRecords) {
+      const mxLower = mx.toLowerCase();
+      for (const [provider, patterns] of Object.entries(this._inboxProviderPatterns)) {
+        if (patterns.some(p => p.test(mxLower))) {
+          return provider;
+        }
+      }
+    }
+    return 'Other';
+  }
+
+  // Check domain age using DNS SOA records
+  async checkDomainAge(domain) {
+    try {
+      const soaRecords = await this._resolveDns('resolveSoa', domain);
+      if (soaRecords) {
+        // SOA serial is often in YYYYMMDD format
+        const serial = soaRecords.serial;
+        const serialStr = serial.toString();
+
+        let estimatedDate = null;
+        if (serialStr.length >= 8) {
+          const year = parseInt(serialStr.substring(0, 4));
+          const month = parseInt(serialStr.substring(4, 6));
+          const day = parseInt(serialStr.substring(6, 8));
+          if (!isNaN(year) && year >= 1990 && year <= 2100 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+            const _cand = new Date(year, month - 1, day);
+            estimatedDate = isNaN(_cand.getTime()) ? null : _cand;
+          }
+        }
+
+        return {
+          hasSOA: true,
+          serial: soaRecords.serial,
+          hostmaster: soaRecords.hostmaster,
+          estimatedDate,
+          refresh: soaRecords.refresh,
+          isNewDomain: estimatedDate ? (Date.now() - estimatedDate.getTime()) < 30 * 24 * 60 * 60 * 1000 : false
+        };
+      }
+      return { hasSOA: false };
+    } catch (error) {
+      return { hasSOA: false, error: error.message };
+    }
+  }
+
+  // Real SMTP mailbox verification using RCPT TO with greylisting support
+  async verifyMailboxSMTP(email, mxHosts, timeout = null) {
+    const effectiveTimeout = timeout || this.defaultTimeout;
+    const hosts = Array.isArray(mxHosts) ? mxHosts : [mxHosts];
+    let lastResult = null;
+
+    for (const host of hosts) {
+      const result = await this._smtpCheck(email, host, effectiveTimeout);
+      lastResult = result;
+
+      if (result.smtpCode && (result.smtpCode === 450 || result.smtpCode === 451)) {
+        const response = (result.smtpResponse || '').toLowerCase();
+        const isGreylisted = response.includes('greylist') || response.includes('graylist') ||
+          response.includes('try again') || response.includes('temporarily') ||
+          response.includes('please retry') || response.includes('come back later');
+
+        if (isGreylisted) {
+          // Retry after delay for greylisting
+          for (let retry = 0; retry < this.greylistMaxRetries; retry++) {
+            await new Promise(resolve => setTimeout(resolve, this.greylistRetryDelay));
+            const retryResult = await this._smtpCheck(email, host, effectiveTimeout);
+            if (retryResult.smtpCode !== 450 && retryResult.smtpCode !== 451) {
+              return retryResult;
+            }
+            lastResult = retryResult;
+          }
+          result.status = 'greylisted';
+          result.reason = 'Server is greylisting - temporary rejection after retries';
+          return result;
+        }
+      }
+
+      if (result.status !== 'error' && result.status !== 'timeout') {
+        return result;
+      }
+    }
+
+    return lastResult;
+  }
+
+  // Internal SMTP check (single attempt)
+  _smtpCheck(email, mxHost, timeout) {
     return new Promise((resolve) => {
+      let socket;
       const timeoutId = setTimeout(() => {
-        socket.destroy();
-        resolve({ 
-          valid: false, 
+        try { if (socket) socket.destroy(); } catch (e) {}
+        resolve({
+          valid: false,
           status: 'timeout',
           reason: 'Connection timeout',
           smtpCode: null,
@@ -344,111 +609,138 @@ class VerificationService {
         });
       }, timeout);
 
-      const socket = net.createConnection(25, mxHost);
+      socket = net.createConnection(25, mxHost);
       let step = 0;
-      let lastResponse = '';
-      let smtpCode = null;
+      let buffer = '';  // Buffer for incomplete responses
 
       const cleanup = () => {
         clearTimeout(timeoutId);
         try { socket.destroy(); } catch (e) {}
       };
 
+      // Helper to check if a response is complete (ends with code + space, not dash)
+      const isCompleteResponse = (line) => {
+        const match = line.match(/^(\d{3})\s/);
+        return match !== null;
+      };
+
+      // Get last complete response line from buffer
+      const getLastCompleteLine = (text) => {
+        const lines = text.split(/\r?\n/);
+        for (let i = lines.length - 1; i >= 0; i--) {
+          if (lines[i].trim() && isCompleteResponse(lines[i].trim())) {
+            return lines[i].trim();
+          }
+        }
+        return null;
+      };
+
       socket.setEncoding('utf8');
 
       socket.on('data', (data) => {
-        lastResponse = data.toString().trim();
-        const code = parseInt(lastResponse.substring(0, 3), 10);
+        buffer += data.toString();
+        const lastCompleteLine = getLastCompleteLine(buffer);
+        if (!lastCompleteLine) return; // Response not complete yet
+
+        const code = parseInt(lastCompleteLine.substring(0, 3), 10);
 
         if (step === 0) {
           // Server greeting
-          if (lastResponse.startsWith('220')) {
-            socket.write(`EHLO bulky.local\r\n`);
+          if (code === 220) {
+            socket.write(`EHLO verify.bulkymail.app\r\n`);
+            buffer = '';
             step++;
           } else {
             cleanup();
-            resolve({ valid: false, status: 'error', reason: 'Server rejected connection', smtpCode: code, smtpResponse: lastResponse });
+            resolve({ valid: false, status: 'error', reason: 'Server rejected connection', smtpCode: code, smtpResponse: lastCompleteLine });
           }
         } else if (step === 1) {
           // EHLO response
-          if (lastResponse.startsWith('250')) {
-            socket.write(`MAIL FROM:<verify@bulky.local>\r\n`);
+          if (code === 250) {
+            socket.write(`MAIL FROM:<verify@bulkymail.app>\r\n`);
+            buffer = '';
             step++;
-          } else {
+          } else if (code >= 500) {
             // Try HELO instead
-            socket.write(`HELO bulky.local\r\n`);
+            socket.write(`HELO verify.bulkymail.app\r\n`);
+            buffer = '';
             step = 10; // Alternative path
+          } else {
+            cleanup();
+            resolve({ valid: false, status: 'error', reason: 'Server rejected EHLO', smtpCode: code, smtpResponse: lastCompleteLine });
           }
         } else if (step === 10) {
           // HELO response (fallback)
-          if (lastResponse.startsWith('250')) {
-            socket.write(`MAIL FROM:<verify@bulky.local>\r\n`);
+          if (code === 250) {
+            socket.write(`MAIL FROM:<verify@bulkymail.app>\r\n`);
+            buffer = '';
             step = 2;
           } else {
             cleanup();
-            resolve({ valid: false, status: 'error', reason: 'Server rejected HELO', smtpCode: code, smtpResponse: lastResponse });
+            resolve({ valid: false, status: 'error', reason: 'Server rejected HELO', smtpCode: code, smtpResponse: lastCompleteLine });
           }
         } else if (step === 2) {
           // MAIL FROM response
-          if (lastResponse.startsWith('250')) {
+          if (code === 250) {
             socket.write(`RCPT TO:<${email}>\r\n`);
+            buffer = '';
             step++;
           } else {
             cleanup();
-            resolve({ valid: false, status: 'error', reason: 'Server rejected sender', smtpCode: code, smtpResponse: lastResponse });
+            resolve({ valid: false, status: 'error', reason: 'Server rejected sender', smtpCode: code, smtpResponse: lastCompleteLine });
           }
         } else if (step === 3) {
           // RCPT TO response - THE KEY CHECK
-          smtpCode = code;
-          socket.write(`QUIT\r\n`);
-          cleanup();
+          // Send QUIT gracefully before destroying socket
+          try { socket.write('QUIT\r\n'); } catch (_e) {}
+          setTimeout(() => { cleanup(); }, 100);
 
           const codeInfo = this.smtpCodes[code] || { status: 'unknown', meaning: 'Unknown response' };
-          
+
           if (code === 250 || code === 251) {
-            resolve({ 
-              valid: true, 
+            resolve({
+              valid: true,
               status: 'valid',
               deliverable: true,
               reason: 'Mailbox exists',
               smtpCode: code,
-              smtpResponse: lastResponse
+              smtpResponse: lastCompleteLine
             });
           } else if (code === 252) {
-            resolve({ 
-              valid: true, 
+            resolve({
+              valid: true,
               status: 'unknown',
               deliverable: 'unknown',
               reason: 'Server cannot verify but will accept',
               smtpCode: code,
-              smtpResponse: lastResponse
+              smtpResponse: lastCompleteLine
             });
           } else if (code === 550 || code === 551 || code === 553 || code === 554) {
-            resolve({ 
-              valid: false, 
+            resolve({
+              valid: false,
               status: 'invalid',
               deliverable: false,
               reason: codeInfo.meaning,
               smtpCode: code,
-              smtpResponse: lastResponse
+              smtpResponse: lastCompleteLine
             });
           } else if (code === 450 || code === 451 || code === 452 || code === 552) {
-            resolve({ 
-              valid: true, 
+            resolve({
+              valid: true,
               status: 'temporary',
               deliverable: 'temporary_issue',
               reason: codeInfo.meaning,
               smtpCode: code,
-              smtpResponse: lastResponse
+              smtpResponse: lastCompleteLine
             });
           } else {
-            resolve({ 
-              valid: true, 
+            resolve({
+              valid: true,
               status: 'unknown',
               deliverable: 'unknown',
               reason: `Unexpected response code: ${code}`,
               smtpCode: code,
-              smtpResponse: lastResponse
+              smtpResponse: lastCompleteLine
             });
           }
         }
@@ -456,10 +748,10 @@ class VerificationService {
 
       socket.on('error', (err) => {
         cleanup();
-        resolve({ 
-          valid: true, 
+        resolve({
+          valid: false,
           status: 'error',
-          deliverable: 'unknown',
+          deliverable: false,
           reason: `Connection error: ${err.message}`,
           smtpCode: null,
           smtpResponse: err.message
@@ -472,25 +764,60 @@ class VerificationService {
     });
   }
 
-  // Detect catch-all domains by testing a random nonexistent address
-  async detectCatchAll(domain, mxHost) {
-    const randomEmail = `bulky_test_${Date.now()}_${Math.random().toString(36).substring(7)}@${domain}`;
-    try {
-      const result = await this.verifyMailboxSMTP(randomEmail, mxHost, 8000);
-      // If a random address is accepted, it's a catch-all domain
-      if (result.valid && result.smtpCode === 250) {
-        return { isCatchAll: true, reason: 'Domain accepts all addresses' };
-      }
-      return { isCatchAll: false };
-    } catch (error) {
-      return { isCatchAll: false, error: error.message };
+  // Detect catch-all domains with multiple random addresses for better accuracy
+  async detectCatchAll(domain, mxHosts) {
+    const hosts = Array.isArray(mxHosts) ? mxHosts : [mxHosts];
+
+    // Check cache first
+    const cached = this._getCachedDomain(domain);
+    if (cached && cached.catchAllChecked) {
+      return { isCatchAll: cached.isCatchAll, reason: cached.catchAllReason || '' };
     }
+
+    const testCount = 3; // Test with multiple random addresses
+    let acceptedCount = 0;
+
+    for (let i = 0; i < testCount; i++) {
+      const randomPart = `bulky_vrfy_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+      const randomEmail = `${randomPart}@${domain}`;
+      let acceptedForThisEmail = false;
+
+      for (const host of hosts) {
+        try {
+          const result = await this._smtpCheck(randomEmail, host, this.catchAllTimeout);
+          if (result.valid && result.smtpCode === 250) {
+            acceptedForThisEmail = true;
+            break;
+          }
+        } catch (error) {
+          // Ignore individual check errors
+        }
+      }
+
+      if (acceptedForThisEmail) {
+        acceptedCount++;
+      }
+
+      // Short delay between checks
+      if (i < testCount - 1) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+
+    const isCatchAll = acceptedCount >= 2; // At least 2 out of 3 accepted = catch-all
+    const reason = isCatchAll ? 'Domain accepts all addresses' : '';
+
+    // Cache the result
+    const existing = this._getCachedDomain(domain) || {};
+    this._setCachedDomain(domain, { ...existing, catchAllChecked: true, isCatchAll, catchAllReason: reason });
+
+    return { isCatchAll, reason };
   }
 
   // Main verification method with all checks
   async verifyEmail(email, options = {}) {
-    const { skipSmtpCheck = false, checkCatchAll = true } = options;
-    
+    const { skipSmtpCheck = false, checkCatchAll = true, timeout = null } = options;
+
     const result = {
       email: email,
       status: 'unknown',
@@ -502,14 +829,16 @@ class VerificationService {
         smtpResponse: null,
         isCatchAll: false,
         isDisposable: false,
-        isRoleBased: false
+        isRoleBased: false,
+        inboxProvider: 'Unknown',
+        domainAge: null
       }
     };
 
     // Step 1: Syntax validation
     const syntaxResult = this.validateSyntax(email);
     result.checks.syntax = syntaxResult.valid;
-    
+
     if (!syntaxResult.valid) {
       result.status = 'invalid';
       result.reason = syntaxResult.reason;
@@ -524,7 +853,7 @@ class VerificationService {
     const isDisposable = this.checkDisposable(syntaxResult.domain);
     result.checks.disposable = !isDisposable;
     result.details.isDisposable = isDisposable;
-    
+
     if (isDisposable) {
       result.status = 'risky';
       result.reason = 'Disposable email domain';
@@ -538,7 +867,7 @@ class VerificationService {
     const isRoleBased = this.checkRoleBased(syntaxResult.localPart);
     result.checks.roleBased = !isRoleBased;
     result.details.isRoleBased = isRoleBased;
-    
+
     if (isRoleBased) {
       result.score -= 10; // Penalty but continue verification
     } else {
@@ -546,48 +875,79 @@ class VerificationService {
     }
 
     // Step 4: MX record check
-    const mxResult = await this.checkMxRecords(syntaxResult.domain);
+    let mxResult;
+    try {
+      mxResult = await this.checkMxRecords(syntaxResult.domain);
+    } catch (error) {
+      result.status = 'risky';
+      result.checks.mxRecords = false;
+      result.details.dnsError = error.message;
+      result.score += 10; // Partial score
+      mxResult = { valid: false };
+    }
     result.checks.mxRecords = mxResult.valid;
-    
+
     if (!mxResult.valid) {
       result.status = 'invalid';
-      result.reason = mxResult.reason;
+      result.reason = mxResult.reason || 'DNS lookup failed';
       result.details.method = 'dns_only';
       return result;
     }
     result.score += 20;
+
+    // Step 4b: Detect inbox provider
+    result.details.inboxProvider = this.detectInboxProvider(mxResult.mxRecords);
+
+    // Step 4c: Domain age check
+    try {
+      const ageResult = await this.checkDomainAge(syntaxResult.domain);
+      result.details.domainAge = ageResult;
+      if (ageResult.isNewDomain) {
+        result.score -= 5; // Slight penalty for very new domains
+      }
+    } catch (error) {
+      result.details.domainAge = { error: error.message };
+      result.score -= 2; // Minor penalty
+    }
 
     // Step 5: SMTP mailbox verification
     if (!skipSmtpCheck) {
       try {
         // First check for catch-all if enabled
         if (checkCatchAll) {
-          const catchAllResult = await this.detectCatchAll(syntaxResult.domain, mxResult.primaryMx);
+          const catchAllResult = await this.detectCatchAll(syntaxResult.domain, mxResult.mxRecords);
           result.details.isCatchAll = catchAllResult.isCatchAll;
-          
+
           if (catchAllResult.isCatchAll) {
             result.checks.catchAll = false;
-            result.score -= 15; // Can't truly verify on catch-all domains
+            result.score -= 15;
           } else {
             result.checks.catchAll = true;
           }
         }
 
         // Now verify the actual email
-        const smtpResult = await this.verifyMailboxSMTP(result.email, mxResult.primaryMx);
+        const smtpResult = await this.verifyMailboxSMTP(result.email, mxResult.mxRecords, timeout);
         result.checks.smtp = smtpResult.valid;
         result.details.smtpCode = smtpResult.smtpCode;
         result.details.smtpResponse = smtpResult.smtpResponse;
         result.details.method = 'smtp';
 
-        if (!smtpResult.valid) {
+        if (smtpResult.status === 'greylisted') {
+          result.details.isGreylisted = true;
+          result.score += 5;
+          result.reason = 'Server is greylisting - email likely valid but unverifiable';
+        } else if (smtpResult.status === 'timeout' || smtpResult.status === 'error') {
+          result.checks.smtp = 'inconclusive';
+          result.details.method = 'dns_only';
+          result.score += 5;
+          result.reason = 'SMTP verification unavailable; DNS checks passed';
+        } else if (!smtpResult.valid) {
           result.status = 'invalid';
           result.reason = smtpResult.reason;
           result.score = Math.max(0, result.score - 30);
           return result;
-        }
-        
-        if (smtpResult.deliverable === true) {
+        } else if (smtpResult.deliverable === true) {
           result.score += 25;
         } else if (smtpResult.deliverable === 'temporary_issue') {
           result.score += 10;
@@ -603,7 +963,7 @@ class VerificationService {
     } else {
       result.checks.smtp = 'skipped';
       result.details.method = 'dns_only';
-      result.score += 5;
+      result.score += 20;
     }
 
     // Determine final status based on score and checks
@@ -631,83 +991,131 @@ class VerificationService {
     return result;
   }
 
-  // Bulk verification with progress tracking
+  // Pause bulk verification
+  pause() { this._isPaused = true; }
+
+  // Resume bulk verification
+  resume() { this._isPaused = false; }
+
+  // Stop bulk verification
+  stop() { this._isStopped = true; this._isPaused = false; }
+
+  // Reset pause/stop state
+  _resetState() { this._isPaused = false; this._isStopped = false; }
+
+  // Run tasks with limited concurrency
+  async _runConcurrent(items, concurrency, asyncFn) {
+    const results = new Array(items.length);
+    let index = 0;
+
+    const worker = async () => {
+      while (index < items.length) {
+        // Check pause/stop
+        while (this._isPaused && !this._isStopped) {
+          await new Promise(resolve => setTimeout(resolve, 200));
+        }
+        if (this._isStopped) break;
+
+        const currentIndex = index++;
+        if (currentIndex >= items.length) break;
+        results[currentIndex] = await asyncFn(items[currentIndex], currentIndex);
+      }
+    };
+
+    const workers = [];
+    for (let i = 0; i < Math.min(concurrency, items.length); i++) {
+      workers.push(worker());
+    }
+    await Promise.all(workers);
+
+    return results;
+  }
+
+  // Bulk verification with progress tracking, concurrency, and pause/resume/stop
   async verifyBulk(emails, onProgress, options = {}) {
-    const { skipSmtpCheck = false, checkCatchAll = true } = options;
-    const results = [];
+    const { skipSmtpCheck = false, checkCatchAll = true, concurrency = null } = options;
+    const effectiveConcurrency = concurrency || this.concurrency;
+
+    this._resetState();
+
     const total = emails.length;
-    const domainCache = new Map(); // Cache MX lookups and catch-all results
+    let completedCount = 0;
 
-    for (let i = 0; i < emails.length; i++) {
-      const email = emails[i];
-      
+    const results = await this._runConcurrent(emails, effectiveConcurrency, async (email, idx) => {
       try {
-        // Extract domain for caching
         const domain = email.split('@')[1]?.toLowerCase();
-        
-        // Check cache for catch-all status
-        let cachedCatchAll = null;
-        if (domain && domainCache.has(domain)) {
-          cachedCatchAll = domainCache.get(domain);
-        }
 
-        const result = await this.verifyEmail(email, { 
-          skipSmtpCheck, 
-          checkCatchAll: checkCatchAll && !cachedCatchAll 
+        // Use cached catch-all status if available
+        const cached = domain ? this._getCachedDomain(domain) : null;
+        const skipCatchAllCheck = cached && cached.catchAllChecked;
+
+        const result = await this.verifyEmail(email, {
+          skipSmtpCheck,
+          checkCatchAll: checkCatchAll && !skipCatchAllCheck
         });
-        
-        // Cache catch-all result
-        if (domain && result.details.isCatchAll !== undefined && !domainCache.has(domain)) {
-          domainCache.set(domain, result.details.isCatchAll);
-        }
-        
+
         // Apply cached catch-all if we skipped the check
-        if (cachedCatchAll !== null) {
-          result.details.isCatchAll = cachedCatchAll;
-          if (cachedCatchAll && result.status === 'valid') {
+        if (skipCatchAllCheck && cached.isCatchAll !== undefined) {
+          result.details.isCatchAll = cached.isCatchAll;
+          if (cached.isCatchAll && result.status === 'valid') {
             result.status = 'risky';
             result.reason = 'Catch-all domain - cannot fully verify';
             result.score = Math.min(result.score, 65);
           }
         }
 
-        results.push(result);
+        completedCount++;
+        if (onProgress) {
+          onProgress({
+            current: completedCount,
+            total,
+            email,
+            status: result.status,
+            paused: this._isPaused,
+            stopped: this._isStopped
+          });
+        }
+
+        return result;
       } catch (error) {
-        results.push({
+        completedCount++;
+        const errorResult = {
           email,
           status: 'error',
           reason: error.message,
           score: 0,
           checks: {},
           details: { method: 'error' }
-        });
-      }
+        };
 
-      if (onProgress) {
-        onProgress({
-          current: i + 1,
-          total,
-          email,
-          status: results[results.length - 1].status
-        });
-      }
+        if (onProgress) {
+          onProgress({
+            current: completedCount,
+            total,
+            email,
+            status: 'error',
+            paused: this._isPaused,
+            stopped: this._isStopped
+          });
+        }
 
-      // Small delay between verifications to avoid rate limiting
-      if (!skipSmtpCheck) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-      } else {
-        await new Promise(resolve => setTimeout(resolve, 50));
+        return errorResult;
       }
-    }
+    });
+
+    // Filter out undefined entries (from stopped workers)
+    const validResults = results.filter(r => r != null);
 
     return {
-      results,
+      results: validResults,
       summary: {
         total,
-        valid: results.filter(r => r.status === 'valid').length,
-        risky: results.filter(r => r.status === 'risky').length,
-        invalid: results.filter(r => r.status === 'invalid').length,
-        error: results.filter(r => r.status === 'error').length
+        completed: validResults.length,
+        valid: validResults.filter(r => r.status === 'valid').length,
+        risky: validResults.filter(r => r.status === 'risky').length,
+        invalid: validResults.filter(r => r.status === 'invalid').length,
+        error: validResults.filter(r => r.status === 'error').length,
+        stopped: this._isStopped
       }
     };
   }
