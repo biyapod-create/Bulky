@@ -545,7 +545,7 @@
 .campaign-row-avatar.draft     { background: rgba(113,113,122,0.15); color: var(--text-muted); }
 .campaign-row-avatar.scheduled { background: rgba(245,158,11,0.12);  color: var(--warning); }
 .campaign-row-avatar.running   { background: rgba(34,197,94,0.12);   color: var(--success); }
-.campaign-row-avatar.completed { background: rgba(124,58,237,0.12);  color: var(--accent); }
+.campaign-row-avatar.completed { background: var(--accent-dim);  color: var(--accent); }
 .campaign-row-avatar.paused    { background: rgba(245,158,11,0.12);  color: var(--warning); }
 .campaign-row-avatar.failed    { background: rgba(239,68,68,0.12);   color: var(--error); }
 

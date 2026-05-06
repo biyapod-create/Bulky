@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 import { useNavigation } from './NavigationContext';
 import { useEntitlement } from './EntitlementContext';
 import SidebarAssistant from './SidebarAssistant';
@@ -13,32 +13,21 @@ import {
 function Sidebar() {
   const { activePage, navigateTo } = useNavigation();
   const { hasCapability } = useEntitlement();
-  const [logoError,   setLogoError]   = useState(false);
-  const [isCollapsed, setIsCollapsed] = useState(
-    () => window.matchMedia('(max-width: 900px)').matches
-  );
+  const [logoError, setLogoError] = React.useState(false);
   const BrandFallbackIcon = sidebarBrandFallbackIcon;
-  const visibleNavItems = navItems.filter((item) => !item.capability || hasCapability(item.capability));
   const visibleNavGroups = navGroups
     .map((group) => ({
       ...group,
       items: group.items.filter((item) => !item.capability || hasCapability(item.capability))
     }))
     .filter((group) => group.items.length > 0);
-  const settingsNavItem = visibleNavItems.find((item) => item.path === SETTINGS_PATH);
+  const settingsNavItem = navItems.find((item) => item.path === SETTINGS_PATH);
   const SettingsIcon = settingsNavItem?.icon;
   const settingsLabel = pageLabelMap[SETTINGS_PATH] || 'Settings';
 
-  useEffect(() => {
-    const mq = window.matchMedia('(max-width: 900px)');
-    const handler = (e) => setIsCollapsed(e.matches);
-    mq.addEventListener('change', handler);
-    return () => mq.removeEventListener('change', handler);
-  }, []);
-
   return (
     <aside className="sidebar">
-      {/* ── Logo — no version number ── */}
+      {/* Logo mark only — no text */}
       <div className="sidebar-brand">
         <div className="sidebar-logo-wrap">
           {!logoError ? (
@@ -49,59 +38,40 @@ function Sidebar() {
               onError={() => setLogoError(true)}
             />
           ) : (
-            <div className="sidebar-logo-fallback">
-              <BrandFallbackIcon size={isCollapsed ? 22 : 28} style={{ color: 'var(--accent)', flexShrink: 0 }} />
-              {!isCollapsed && <span className="sidebar-logo-text">Bulky</span>}
-            </div>
+            <BrandFallbackIcon size={24} style={{ color: 'var(--accent)' }} />
           )}
         </div>
       </div>
 
-      {/* ── Navigation ── */}
+      {/* Icon-only navigation */}
       <nav className="sidebar-nav">
-        {isCollapsed ? (
-          visibleNavItems.map(({ path, icon: Icon, label }) => (
-            <div
-              key={path}
-              className={`nav-item ${activePage === path ? 'active' : ''}`}
-              onClick={() => navigateTo(path)}
-              title={label}
-            >
-              <Icon size={20} />
-            </div>
-          ))
-        ) : (
-          <>
-            {visibleNavGroups.map((group) => (
-              <div key={group.label} className="sidebar-group">
-                <div className="sidebar-section-label">{group.label}</div>
-                {group.items.map(({ path, icon: Icon, label }) => (
-                  <div
-                    key={path}
-                    className={`nav-item ${activePage === path ? 'active' : ''}`}
-                    onClick={() => navigateTo(path)}
-                  >
-                    <Icon size={17} />
-                    <span>{label}</span>
-                  </div>
-                ))}
+        {visibleNavGroups.map((group) => (
+          <div key={group.label} className="sidebar-group">
+            {group.items.map(({ path, icon: Icon, label }) => (
+              <div
+                key={path}
+                className={`nav-item ${activePage === path ? 'active' : ''}`}
+                onClick={() => navigateTo(path)}
+                title={label}
+              >
+                <Icon size={18} />
               </div>
             ))}
-            <div className="sidebar-settings-group">
-              <div
-                className={`nav-item ${activePage === SETTINGS_PATH ? 'active' : ''}`}
-                onClick={() => navigateTo(SETTINGS_PATH)}
-              >
-                {SettingsIcon ? <SettingsIcon size={17} /> : null}
-                <span>{settingsLabel}</span>
-              </div>
-            </div>
-          </>
-        )}
+          </div>
+        ))}
+        <div className="sidebar-settings-group">
+          <div
+            className={`nav-item ${activePage === SETTINGS_PATH ? 'active' : ''}`}
+            onClick={() => navigateTo(SETTINGS_PATH)}
+            title={settingsLabel}
+          >
+            {SettingsIcon ? <SettingsIcon size={18} /> : null}
+          </div>
+        </div>
       </nav>
 
-      {/* ── AI Assistant ── */}
-      {!isCollapsed && hasCapability('aiAssistant') && (
+      {/* AI Assistant widget — compact */}
+      {hasCapability('aiAssistant') && (
         <div className="sidebar-footer compact">
           <SidebarAssistant />
         </div>
