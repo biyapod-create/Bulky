@@ -53,6 +53,20 @@ function registerAccountHandlers({
 
     return desktopAccountService.signOut();
   });
+
+  safeHandler('account:updateProfile', async (e, payload) => {
+    if (!desktopAccountService) return { error: 'Desktop account service is not initialized' };
+    const fullName = String(payload?.fullName ?? '').trim();
+    const workspaceName = String(payload?.workspaceName ?? '').trim();
+    return desktopAccountService.updateProfile({ fullName, workspaceName });
+  });
+
+  safeHandler('account:changePassword', async (e, payload) => {
+    if (!desktopAccountService) return { error: 'Desktop account service is not initialized' };
+    const currentPassword = String(payload?.currentPassword ?? '');
+    const newPassword = String(payload?.newPassword ?? '');
+    return desktopAccountService.changePassword({ currentPassword, newPassword });
+  });
 }
 
 module.exports = registerAccountHandlers;

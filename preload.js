@@ -236,7 +236,9 @@ contextBridge.exposeInMainWorld('electron', {
     signUp:          (payload) => ipcRenderer.invoke('account:signUp', payload),
     signIn:          (payload) => ipcRenderer.invoke('account:signIn', payload),
     refresh:                   () => ipcRenderer.invoke('account:refresh'),
-    signOut:                   () => ipcRenderer.invoke('account:signOut')
+    signOut:                   () => ipcRenderer.invoke('account:signOut'),
+    updateProfile:   (payload) => ipcRenderer.invoke('account:updateProfile', payload),
+    changePassword:  (payload) => ipcRenderer.invoke('account:changePassword', payload)
   },
 
   // AI

@@ -2603,6 +2603,7 @@ function Settings({ isActive }) {
             handleRunCloudDiagnostics={handleRunCloudDiagnostics}
             handleSyncNow={handleSyncNow}
             handleOpenCheckout={handleOpenCheckout}
+            addToast={addToast}
           />
         )}
 

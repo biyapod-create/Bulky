@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Cloud,
   CreditCard,
+  KeyRound,
   LogIn,
   LogOut,
   RefreshCw,
@@ -71,11 +72,70 @@ export default function CloudServicesTab({
   handleAccountRefresh,
   handleRunCloudDiagnostics,
   handleSyncNow,
-  handleOpenCheckout
+  handleOpenCheckout,
+  addToast
 }) {
   const updateField = (key, value) => setCloudConfig((prev) => ({ ...prev, [key]: value }));
   const authenticated = !!accountStatus?.authenticated;
   const pendingConfirmation = accountStatus?.status === 'pending_confirmation';
+
+  // Profile edit state — seeded from accountStatus and kept in sync when it updates
+  const [profileForm, setProfileForm] = useState({
+    fullName: accountStatus?.account?.fullName || '',
+    workspaceName: accountStatus?.account?.workspaceName || ''
+  });
+  React.useEffect(() => {
+    if (accountStatus?.account) {
+      setProfileForm({
+        fullName: accountStatus.account.fullName || '',
+        workspaceName: accountStatus.account.workspaceName || ''
+      });
+    }
+  }, [accountStatus?.account?.fullName, accountStatus?.account?.workspaceName]);
+  const [savingProfile, setSavingProfile] = useState(false);
+
+  // Password change state
+  const [passwordForm, setPasswordForm] = useState({ currentPassword: '', newPassword: '', confirmPassword: '' });
+  const [savingPassword, setSavingPassword] = useState(false);
+  const [showPasswords, setShowPasswords] = useState(false);
+
+  const handleSaveProfile = async () => {
+    setSavingProfile(true);
+    try {
+      const result = await window.electron?.account?.updateProfile?.(profileForm);
+      if (result?.error) { addToast('Failed to update profile: ' + result.error, 'error'); return; }
+      addToast('Profile updated', 'success');
+    } catch (err) {
+      addToast('Failed to update profile', 'error');
+    } finally {
+      setSavingProfile(false);
+    }
+  };
+
+  const handleChangePassword = async () => {
+    if (passwordForm.newPassword !== passwordForm.confirmPassword) {
+      addToast('New passwords do not match', 'error');
+      return;
+    }
+    if (passwordForm.newPassword.length < 8) {
+      addToast('New password must be at least 8 characters', 'error');
+      return;
+    }
+    setSavingPassword(true);
+    try {
+      const result = await window.electron?.account?.changePassword?.({
+        currentPassword: passwordForm.currentPassword,
+        newPassword: passwordForm.newPassword
+      });
+      if (result?.error) { addToast('Failed to change password: ' + result.error, 'error'); return; }
+      setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+      addToast('Password changed successfully', 'success');
+    } catch (err) {
+      addToast('Failed to change password', 'error');
+    } finally {
+      setSavingPassword(false);
+    }
+  };
   const currentPlanId = accountStatus?.plan?.id || '';
   const showInfrastructureConfig = process.env.NODE_ENV !== 'production';
   const accountConfigured = !!accountStatus?.configured;
@@ -369,6 +429,97 @@ export default function CloudServicesTab({
           </div>
         )}
       </div>
+
+      {authenticated && (
+        <div className="card">
+          <div className="flex justify-between items-start gap-3 mb-4">
+            <div>
+              <h3 className="card-title mb-2"><UserCircle2 size={18} style={{ marginRight: '8px' }} />Profile</h3>
+              <p className="text-muted text-sm">Update your display name and workspace name.</p>
+            </div>
+          </div>
+          <div className="section-stack" style={{ gap: '12px' }}>
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label">Display Name</label>
+                <input
+                  className="form-input"
+                  type="text"
+                  placeholder="Your full name"
+                  value={profileForm.fullName}
+                  onChange={(e) => setProfileForm((p) => ({ ...p, fullName: e.target.value }))}
+                  maxLength={100}
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Workspace Name</label>
+                <input
+                  className="form-input"
+                  type="text"
+                  placeholder="Your company or project name"
+                  value={profileForm.workspaceName}
+                  onChange={(e) => setProfileForm((p) => ({ ...p, workspaceName: e.target.value }))}
+                  maxLength={100}
+                />
+              </div>
+            </div>
+            <div>
+              <button className="btn btn-primary btn-sm" onClick={handleSaveProfile} disabled={savingProfile}>
+                <Save size={14} /> {savingProfile ? 'Saving…' : 'Save Profile'}
+              </button>
+            </div>
+          </div>
+
+          <div style={{ borderTop: '1px solid var(--border-subtle)', margin: '20px 0' }} />
+
+          <div className="mb-4">
+            <h4 className="card-title mb-1" style={{ fontSize: '14px' }}><KeyRound size={15} style={{ marginRight: '6px' }} />Change Password</h4>
+            <p className="text-muted text-sm">Must be at least 8 characters.</p>
+          </div>
+          <div className="section-stack" style={{ gap: '12px' }}>
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label">Current Password</label>
+                <input
+                  className="form-input"
+                  type={showPasswords ? 'text' : 'password'}
+                  placeholder="Current password"
+                  value={passwordForm.currentPassword}
+                  onChange={(e) => setPasswordForm((p) => ({ ...p, currentPassword: e.target.value }))}
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">New Password</label>
+                <input
+                  className="form-input"
+                  type={showPasswords ? 'text' : 'password'}
+                  placeholder="New password (min 8 chars)"
+                  value={passwordForm.newPassword}
+                  onChange={(e) => setPasswordForm((p) => ({ ...p, newPassword: e.target.value }))}
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Confirm New Password</label>
+                <input
+                  className="form-input"
+                  type={showPasswords ? 'text' : 'password'}
+                  placeholder="Repeat new password"
+                  value={passwordForm.confirmPassword}
+                  onChange={(e) => setPasswordForm((p) => ({ ...p, confirmPassword: e.target.value }))}
+                />
+              </div>
+            </div>
+            <div className="flex gap-2 items-center">
+              <button className="btn btn-primary btn-sm" onClick={handleChangePassword} disabled={savingPassword || !passwordForm.newPassword}>
+                <KeyRound size={14} /> {savingPassword ? 'Changing…' : 'Change Password'}
+              </button>
+              <button className="btn btn-ghost btn-sm" onClick={() => setShowPasswords((v) => !v)}>
+                {showPasswords ? 'Hide' : 'Show'} passwords
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <div className="flex justify-between items-start gap-3 mb-4">

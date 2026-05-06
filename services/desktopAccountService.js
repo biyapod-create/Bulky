@@ -970,6 +970,72 @@ class DesktopAccountService {
     }
   }
 
+  async updateProfile({ fullName, workspaceName }) {
+    if (!this.isConfigured()) return { error: 'Account service is not configured' };
+
+    const status = this.getStatus();
+    if (!status.authenticated) return { error: 'You must be signed in to update your profile' };
+
+    const trimmedName = String(fullName || '').trim();
+    const trimmedWorkspace = String(workspaceName || '').trim();
+    if (!trimmedName && !trimmedWorkspace) return { error: 'Provide at least a display name or workspace name' };
+    if (trimmedName.length > 100) return { error: 'Display name must be 100 characters or fewer' };
+    if (trimmedWorkspace.length > 100) return { error: 'Workspace name must be 100 characters or fewer' };
+
+    try {
+      const client = await this._ensureClient();
+      const session = await this.getCurrentSession();
+      const userId = session?.user?.id;
+      if (!userId) return { error: 'No active session — please sign in again' };
+
+      const updates = {};
+      if (trimmedName) updates.full_name = trimmedName;
+      if (trimmedWorkspace) updates.workspace_name = trimmedWorkspace;
+
+      const { error } = await client.from('profiles').update(updates).eq('id', userId);
+      if (error) return { error: error.message };
+
+      const refreshed = await this.refreshRemoteState();
+      return { success: true, status: refreshed };
+    } catch (err) {
+      this.logger?.warn?.('updateProfile failed', { error: err.message });
+      return { error: err.message || 'Could not update profile' };
+    }
+  }
+
+  async changePassword({ currentPassword, newPassword }) {
+    if (!this.isConfigured()) return { error: 'Account service is not configured' };
+
+    const status = this.getStatus();
+    if (!status.authenticated) return { error: 'You must be signed in to change your password' };
+
+    const trimmedNew = String(newPassword || '').trim();
+    if (!trimmedNew || trimmedNew.length < 8) return { error: 'New password must be at least 8 characters' };
+    if (trimmedNew.length > 72) return { error: 'New password must be 72 characters or fewer' };
+
+    try {
+      const client = await this._ensureClient();
+
+      // Re-authenticate first to confirm current password
+      const email = status.account?.email;
+      if (currentPassword && email) {
+        const { error: reAuthError } = await client.auth.signInWithPassword({
+          email,
+          password: String(currentPassword)
+        });
+        if (reAuthError) return { error: 'Current password is incorrect' };
+      }
+
+      const { error } = await client.auth.updateUser({ password: trimmedNew });
+      if (error) return { error: error.message };
+
+      return { success: true };
+    } catch (err) {
+      this.logger?.warn?.('changePassword failed', { error: err.message });
+      return { error: err.message || 'Could not change password' };
+    }
+  }
+
   async signOut() {
     if (!this.isConfigured()) {
       this.entitlementService?.resetToLocalLegacy?.();
