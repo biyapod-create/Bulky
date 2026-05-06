@@ -126,7 +126,9 @@ function registerMessagingHandlers({
       }
 
       if (smtpAccountId) {
-        smtpSettings = decryptSmtpAccount(db._get('SELECT * FROM smtp_accounts WHERE id = ?', [smtpAccountId]));
+        const smtpRow = db._get('SELECT * FROM smtp_accounts WHERE id = ?', [smtpAccountId]);
+        if (!smtpRow) return { error: 'SMTP account not found' };
+        smtpSettings = decryptSmtpAccount(smtpRow);
       }
       if (!smtpSettings) {
         const accounts = db.getActiveSmtpAccounts();
@@ -164,7 +166,15 @@ function registerMessagingHandlers({
     const validated = validateEmailTestPayload(payload);
     if (validated.error) return { success: false, message: validated.error };
 
-    const { settings, toEmail, subject, content } = validated.value;
+    const { toEmail, subject, content } = validated.value;
+
+    const allAccounts = db.getAllSmtpAccounts ? db.getAllSmtpAccounts() : [];
+    const accountRow = allAccounts.find((a) => a.isActive !== false) || allAccounts[0];
+    if (!accountRow) return { success: false, message: 'No SMTP account configured' };
+
+    const settings = decryptSmtpAccount(accountRow);
+    if (!settings.password) return { success: false, message: 'SMTP account has no saved password' };
+
     const testContact = { id: 'test', email: toEmail, firstName: 'Test', lastName: 'User' };
     const transporter = emailService.createTransporter(settings);
 

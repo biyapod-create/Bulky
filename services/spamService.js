@@ -161,14 +161,10 @@ class SpamService {
     // Remove HTML comments
     text = text.replace(/<!--[\s\S]*?-->/g, '');
 
-    // Remove all HTML tag attributes (including style="...", class="...", etc.)
-    text = text.replace(/<[^>]+>/g, (match) => {
-      const tagMatch = match.match(/<\/?([a-zA-Z0-9]+)/);
-      if (tagMatch) {
-        return ' ';
-      }
-      return ' ';
-    });
+    // Replace block-level tags with a space so adjacent words don't merge
+    text = text.replace(/<\/?(p|div|h[1-6]|li|td|th|br|hr|blockquote|section|article|header|footer|main|aside|tr)[^>]*>/gi, ' ');
+    // Remove all remaining HTML tags
+    text = text.replace(/<[^>]+>/g, '');
 
     // Decode common HTML entities
     text = text.replace(/&nbsp;/gi, ' ');
@@ -389,8 +385,9 @@ class SpamService {
       });
     }
 
-    // ALL CAPS subject
-    if (subject.length > 5 && subject === subject.toUpperCase() && /[A-Z]/.test(subject)) {
+    // ALL CAPS subject — strip merge tags first so {{FIRSTNAME}} doesn't trigger a false positive
+    const subjectWithoutTags = subject.replace(/\{\{[^}]+\}\}/g, '').trim();
+    if (subjectWithoutTags.length > 5 && subjectWithoutTags === subjectWithoutTags.toUpperCase() && /[A-Z]/.test(subjectWithoutTags)) {
       issues.push({
         type: 'caps_subject',
         text: 'Subject line is ALL CAPS',
@@ -686,7 +683,7 @@ class SpamService {
       if (!issue.canAutoFix) continue;
 
       try {
-        if (issue.type === 'spam_word' && issue.word && issue.replacement) {
+        if (issue.type === 'spam_word' && issue.word && issue.replacement != null) {
           const regex = new RegExp(`\\b${this.escapeRegex(issue.word)}\\b`, 'gi');
           const replacement = issue.replacement;
 

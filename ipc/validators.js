@@ -537,8 +537,9 @@ function validateBulkContactsInput(contacts) {
   for (const contact of contacts) {
     if (!isPlainObject(contact)) return fail('Invalid contact in bulk request');
 
-    const email = readCoercibleString(contact.email, 'contact.email', { required: false, maxLength: 320 });
+    const email = readCoercibleString(contact.email, 'contact.email', { required: true, maxLength: 320 });
     if (email.error) return email;
+    if (!EMAIL_REGEX.test(email.value)) return fail(`Invalid email address: ${email.value}`);
 
     const firstName = readCoercibleString(contact.firstName, 'contact.firstName', { required: false, maxLength: 100 });
     if (firstName.error) return firstName;
@@ -1137,7 +1138,7 @@ function validateCampaign(input, { requireId = false } = {}) {
       }
     }
 
-    manualEmails = emails.join(',');
+    manualEmails = emails.map((e) => e.toLowerCase()).join(',');
   }
 
   return ok({
@@ -1242,9 +1243,6 @@ function validateEmailSendPayload(input) {
 function validateEmailTestPayload(input) {
   if (!isPlainObject(input)) return fail('Invalid email test payload');
 
-  const settings = validateSmtpSettings(input.settings, { requireId: false, requireCredentials: true });
-  if (settings.error) return settings;
-
   const toEmail = readRequiredEmail(input.toEmail, 'toEmail');
   if (toEmail.error) return toEmail;
 
@@ -1255,7 +1253,6 @@ function validateEmailTestPayload(input) {
   if (content.error) return content;
 
   return ok({
-    settings: settings.value,
     toEmail: toEmail.value,
     subject: subject.value,
     content: content.value

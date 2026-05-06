@@ -48,13 +48,14 @@ class AutomationEngine {
       triggerConfig = {};
     }
 
-    // Respect campaign/tag/list scoping if configured
+    // Respect campaign/tag/list scoping if configured. Coerce to string so
+    // SQLite integers (e.g. 1) match IPC string payloads (e.g. "1").
     if (triggerConfig.campaignId && context.campaignId &&
-        triggerConfig.campaignId !== context.campaignId) return;
+        String(triggerConfig.campaignId) !== String(context.campaignId)) return;
     if (triggerConfig.tagId && context.tagId &&
-        triggerConfig.tagId !== context.tagId) return;
+        String(triggerConfig.tagId) !== String(context.tagId)) return;
     if (triggerConfig.listId && context.listId &&
-        triggerConfig.listId !== context.listId) return;
+        String(triggerConfig.listId) !== String(context.listId)) return;
 
     this.db.addAutomationLog({
       automationId: automation.id,
@@ -97,8 +98,7 @@ class AutomationEngine {
           // Wait nodes are handled by the drip engine, not inline
           break;
         default:
-          this.logger?.warn('AutomationEngine: unknown node type', { type: node.type });
-          return;
+          throw new Error(`Unknown automation node type: ${node.type}`);
       }
 
       this.db.addAutomationLog({
@@ -125,7 +125,19 @@ class AutomationEngine {
 
   async _actionSendEmail(config, context) {
     const { subject, content, smtpAccountId } = config;
-    if (!subject || !content || !context.email) return;
+    if (!subject || !content) return;
+
+    // Resolve email — context may arrive without it (e.g. from tracking events)
+    let resolvedEmail = context.email || '';
+    let contact = { email: resolvedEmail };
+    if (context.contactId) {
+      const row = this.db._get('SELECT * FROM contacts WHERE id = ?', [context.contactId]);
+      if (row) {
+        contact = row;
+        if (!resolvedEmail) resolvedEmail = row.email || '';
+      }
+    }
+    if (!resolvedEmail) return;
 
     const accounts = this.db.getActiveSmtpAccounts();
     if (!accounts || accounts.length === 0) throw new Error('No active SMTP accounts');
@@ -135,9 +147,6 @@ class AutomationEngine {
       : accounts[0];
 
     const settings = this.decryptSmtpAccount(account);
-    const contact = context.contactId
-      ? (this.db._get('SELECT * FROM contacts WHERE id = ?', [context.contactId]) || { email: context.email })
-      : { email: context.email };
 
     const transporter = this.emailService.createTransporter(settings);
     try {
@@ -147,7 +156,7 @@ class AutomationEngine {
 
       await transporter.sendMail({
         from: `"${settings.fromName}" <${settings.fromEmail}>`,
-        to: context.email,
+        to: resolvedEmail,
         replyTo: settings.replyTo || settings.fromEmail,
         subject: personalizedSubject,
         text: plainText,
@@ -202,7 +211,13 @@ class AutomationEngine {
           headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } },
         (res) => {
           res.resume();
-          res.on('end', resolve);
+          res.on('end', () => {
+            if (res.statusCode < 200 || res.statusCode >= 300) {
+              reject(new Error(`Webhook returned HTTP ${res.statusCode}`));
+            } else {
+              resolve();
+            }
+          });
         }
       );
       req.setTimeout(10000, () => { req.destroy(); reject(new Error('Webhook timed out')); });

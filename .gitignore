@@ -7,6 +7,7 @@ dist/
 dist-release-*/
 renderer/build/
 extracted_asar/
+coverage/
 
 # Environment and local files
 .env
@@ -30,6 +31,7 @@ Thumbs.db
 *.tmp
 *.temp
 temp_*.b64
+.tmp-supabase-live-test*/
 
 # Smoke and local runtime data
 .smoke-userdata/

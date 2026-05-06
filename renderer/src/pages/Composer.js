@@ -34,6 +34,9 @@ function Composer({ isActive }) {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiSubjectSuggestions, setAiSubjectSuggestions] = useState([]);
   const [showAiGenerate, setShowAiGenerate] = useState(false);
+  const [showTestSend, setShowTestSend] = useState(false);
+  const [testSendEmail, setTestSendEmail] = useState('');
+  const [testSendLoading, setTestSendLoading] = useState(false);
   const [deliverabilityInfo, setDeliverabilityInfo] = useState({});
   const [smtpAccounts, setSmtpAccounts] = useState([]);
   const [smtpSettings, setSmtpSettings] = useState({});
@@ -504,6 +507,38 @@ function Composer({ isActive }) {
     setShowTokenPicker(false);
   };
 
+  const handleTestSend = async () => {
+    const email = testSendEmail.trim().toLowerCase();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      addToast('Enter a valid email address', 'error');
+      return;
+    }
+    if (!campaign.subject) { addToast('Add a subject line first', 'error'); return; }
+    if (!campaign.content) { addToast('Add email content first', 'error'); return; }
+
+    if (smtpAccounts.length === 0) { addToast('No SMTP account configured', 'error'); return; }
+
+    setTestSendLoading(true);
+    try {
+      const result = await window.electron.email.testSend({
+        toEmail: email,
+        subject: `[TEST] ${campaign.subject}`,
+        content: campaign.content
+      });
+      if (result?.success) {
+        addToast(`Test email sent to ${email}`, 'success');
+        setShowTestSend(false);
+        setTestSendEmail('');
+      } else {
+        addToast(result?.message || 'Test send failed', 'error');
+      }
+    } catch (e) {
+      addToast(e.message || 'Test send failed', 'error');
+    } finally {
+      setTestSendLoading(false);
+    }
+  };
+
   const handleOpenInBuilder = () => {
     // Navigate to templates page which has the builder
     navigate('/templates', {
@@ -646,6 +681,7 @@ function Composer({ isActive }) {
         handleOpenInBuilder={handleOpenInBuilder}
         handleSaveAsTemplate={handleSaveAsTemplate}
         handleSaveCampaign={handleSaveCampaign}
+        onTestSend={() => setShowTestSend(true)}
         recipientCount={recipientCount}
         recipientMode={recipientMode}
         activeSmtpCount={activeSmtpCount}
@@ -717,6 +753,44 @@ function Composer({ isActive }) {
         />
       </div>
     </div>
+
+    {showTestSend && (
+      <div className="modal-overlay" onClick={() => setShowTestSend(false)}>
+        <div className="modal" style={{ maxWidth: '440px' }} onClick={(e) => e.stopPropagation()}>
+          <div className="modal-header">
+            <h3 className="modal-title">Send Test Email</h3>
+            <button className="modal-close" onClick={() => setShowTestSend(false)}>×</button>
+          </div>
+          <div className="modal-body">
+            <p className="text-sm text-muted mb-3">
+              Send a preview to yourself before sending to your list. Personalization tokens will use sample values.
+            </p>
+            <div className="form-group">
+              <label className="form-label">Send test to</label>
+              <input
+                type="email"
+                className="form-input"
+                placeholder="your@email.com"
+                value={testSendEmail}
+                onChange={(e) => setTestSendEmail(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleTestSend()}
+                autoFocus
+              />
+            </div>
+          </div>
+          <div className="modal-footer">
+            <button className="btn btn-outline" onClick={() => setShowTestSend(false)}>Cancel</button>
+            <button
+              className="btn btn-primary"
+              onClick={handleTestSend}
+              disabled={testSendLoading}
+            >
+              {testSendLoading ? 'Sending…' : 'Send Test'}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
   );
 }
 

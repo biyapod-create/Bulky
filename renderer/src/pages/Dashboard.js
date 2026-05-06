@@ -232,15 +232,11 @@ export default function Dashboard({ isActive }) {
   ), [stats.recentCampaigns]);
 
   const deliveredCount = Math.round((Number(stats.totalSent) || 0) * ((Number(stats.successRate) || 0) / 100));
-  const promoCount  = Math.max(0, Math.round((Number(stats.totalSent) || 0) * 0.121));
-  const spamCount   = Math.max(0, Math.round((Number(stats.totalSent) || 0) * 0.034));
   const bounceCount = Math.max((Number(stats.totalSent) || 0) - deliveredCount, 0) + (stats.retryQueue?.failed || 0);
 
   const deliverySegments = [
-    { label: 'Inbox',      value: deliveredCount, color: '#58c152' },
-    { label: 'Promotions', value: promoCount,     color: '#3b82f6' },
-    { label: 'Spam',       value: spamCount,      color: '#fb923c' },
-    { label: 'Bounce',     value: bounceCount,    color: '#ef4444' }
+    { label: 'Delivered', value: deliveredCount, color: '#58c152' },
+    { label: 'Bounce',    value: bounceCount,    color: '#ef4444' }
   ];
 
   const retryBars   = filteredHistory.slice(-8).map((e) => Number(e.sent || e.count || 0));
@@ -429,7 +425,7 @@ export default function Dashboard({ isActive }) {
                   style={{ height: `${Math.max(18, (v / retryBarMax) * 44)}px` }} />
               ))}
             </div>
-            <div className="dashboard-rail-meta"><Clock3 size={12} />Next retry in 2m 36s</div>
+            <div className="dashboard-rail-meta"><Clock3 size={12} />{stats.retryQueue?.pending > 0 ? 'Pending retries' : 'No retries queued'}</div>
           </div>
 
           {/* Blacklist Alerts */}
@@ -446,7 +442,7 @@ export default function Dashboard({ isActive }) {
                   <div key={e.id} className="dashboard-domain-row">
                     <span>{e.domain || e.email || e.value}</span>
                     <span className="dashboard-domain-count">
-                      {Math.floor(Math.random() * 15) + 1}
+                      {e.bounceCount || e.count || 1}
                     </span>
                   </div>
                 ))

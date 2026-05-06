@@ -156,7 +156,13 @@ function SpamChecker({ isActive }) {
         count++;
       }
       else if (issue.type === 'no_unsubscribe') {
-        fixedContent += '\n\n<p style="font-size:12px;color:#666;">To unsubscribe <a href="{{unsubscribeLink}}">click here</a></p>';
+        const unsubBlock = '\n<p style="font-size:12px;color:#666;text-align:center;margin-top:24px;">To unsubscribe <a href="{{unsubscribeLink}}">click here</a></p>';
+        // Insert before </body> if present, otherwise append
+        if (/<\/body>/i.test(fixedContent)) {
+          fixedContent = fixedContent.replace(/<\/body>/i, `${unsubBlock}\n</body>`);
+        } else {
+          fixedContent += unsubBlock;
+        }
         count++;
       }
       else if (issue.type === 'suspicious') {

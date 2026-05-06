@@ -92,9 +92,9 @@ class AIService {
 
   // ── Core API call ────────────────────────────────────────────────────────────
   async _callApi(messages, maxTokens = 500, timeoutMs = 60000) {
-    // LM Studio on local hardware is often very slow (20-120s per response).
-    // Hard-cap tokens for local provider to prevent multi-minute hangs.
-    const effectiveMaxTokens = (this.provider === 'lmstudio')
+    // LM Studio timeouts are set per-call (up to 5 min for generation).
+    // Only cap tokens for fast chat/classification calls (≤500 requested) to prevent hangs.
+    const effectiveMaxTokens = (this.provider === 'lmstudio' && maxTokens <= 500)
       ? Math.min(maxTokens, 400)
       : maxTokens;
 
@@ -403,23 +403,23 @@ Start with header, end with footer (unsubscribeUrl: "{{unsubscribeLink}}"). Use 
 
     const raw = (res.result || '').trim();
 
-    // Parse ACTION block — handles nested JSON with arrays/objects
-    const actionMatch = raw.match(/\|\|ACTION:(\{[\s\S]*?\})\|\|/);
+    // Parse ACTION block — greedy match so nested objects/arrays aren't truncated
+    const actionMatch = raw.match(/\|\|ACTION:(\{[\s\S]*\})\|\|/);
     let action  = null;
     let reply   = raw;
     if (actionMatch) {
       try   { action = this.parseJsonResponse(actionMatch[1], 'object'); }
       catch { /* ignore malformed */ }
-      reply = raw.replace(/\|\|ACTION:[\s\S]*?\|\|/, '').trim();
+      reply = raw.replace(/\|\|ACTION:[\s\S]*\|\|/, '').trim();
     }
 
-    // Parse CLARIFY block
-    const clarifyMatch = raw.match(/\|\|CLARIFY:(\{[\s\S]*?\})\|\|/);
+    // Parse CLARIFY block — greedy match so nested objects/arrays aren't truncated
+    const clarifyMatch = raw.match(/\|\|CLARIFY:(\{[\s\S]*\})\|\|/);
     let clarify = null;
     if (clarifyMatch) {
       try   { clarify = this.parseJsonResponse(clarifyMatch[1], 'object'); }
       catch { /* ignore */ }
-      reply = raw.replace(/\|\|CLARIFY:[\s\S]*?\|\|/, '').trim();
+      reply = raw.replace(/\|\|CLARIFY:[\s\S]*\|\|/, '').trim();
     }
 
     return { reply, action, clarify };

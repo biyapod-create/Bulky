@@ -79,7 +79,7 @@ class DripEngine {
   }
 
   _delayToMs(delay, unit) {
-    const n = Number(delay) || 1;
+    const n = (delay !== undefined && delay !== null && delay !== '') ? Number(delay) : 1;
     switch (String(unit || 'days').toLowerCase()) {
       case 'minutes': return n * 60 * 1000;
       case 'hours':   return n * 60 * 60 * 1000;
@@ -116,7 +116,9 @@ class DripEngine {
       for (const item of due) {
         if (this._inFlight.has(item.id)) continue;
         this._inFlight.add(item.id);
-        this._processItem(item).finally(() => this._inFlight.delete(item.id));
+        this._processItem(item)
+          .catch((err) => this.logger?.warn('DripEngine unhandled _processItem rejection', { id: item.id, error: err.message }))
+          .finally(() => this._inFlight.delete(item.id));
       }
     } catch (err) {
       this.logger?.warn('DripEngine.tick error', { error: err.message });
@@ -157,11 +159,14 @@ class DripEngine {
 
       if (subject && content) {
         await this._sendStepEmail(seq, item, subject, content);
+      } else {
+        this.logger?.warn('DripEngine: step skipped — missing subject or content', { itemId: item.id, stepIndex: item.stepIndex });
       }
 
       this.db.updateDripQueueItem(item.id, { status: 'completed' });
 
-      // Schedule next step if one exists
+      // Schedule next step if one exists — use item.runAt as base so delays are
+      // anchored to when this step was DUE, not when it actually executed.
       const nextStepIndex = item.stepIndex + 1;
       if (nextStepIndex < steps.length) {
         this._scheduleStep(
@@ -170,7 +175,7 @@ class DripEngine {
           item.email,
           steps,
           nextStepIndex,
-          new Date().toISOString()
+          item.runAt
         );
       }
     } catch (err) {

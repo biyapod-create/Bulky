@@ -664,6 +664,10 @@ class Database {
       { table: 'signup_forms', column: 'doubleOptin', sql: "ALTER TABLE signup_forms ADD COLUMN doubleOptin INTEGER DEFAULT 0" },
       { table: 'signup_forms', column: 'confirmationSubject', sql: "ALTER TABLE signup_forms ADD COLUMN confirmationSubject TEXT DEFAULT 'Please confirm your subscription'" },
       { table: 'signup_forms', column: 'confirmationTemplate', sql: "ALTER TABLE signup_forms ADD COLUMN confirmationTemplate TEXT DEFAULT 'Click the link below to confirm your subscription: {{confirmLink}}'" },
+
+      // drip_queue retry support
+      { table: 'drip_queue', column: 'attempts', sql: "ALTER TABLE drip_queue ADD COLUMN attempts INTEGER DEFAULT 0" },
+      { table: 'drip_queue', column: 'updatedAt', sql: "ALTER TABLE drip_queue ADD COLUMN updatedAt TEXT DEFAULT (datetime('now'))" },
     ];
 
     for (const m of migrations) {
@@ -919,6 +923,18 @@ class Database {
 
   isBlacklisted(email) {
     return contactsRepository.isBlacklisted(this, email);
+  }
+
+  // Returns a Set of all blacklisted emails and domain patterns for in-memory batch checks.
+  getBlacklistSet() {
+    const rows = this._all('SELECT email FROM blacklist');
+    return new Set(rows.map((r) => String(r.email || '').toLowerCase()));
+  }
+
+  // Returns a Set of all unsubscribed emails for in-memory batch checks.
+  getUnsubscribeSet() {
+    const rows = this._all('SELECT email FROM unsubscribes');
+    return new Set(rows.map((r) => String(r.email || '').toLowerCase()));
   }
 
   // Auto-blacklist contacts that hard bounced 2+ times
@@ -1560,28 +1576,47 @@ class Database {
     const { v4: uuidv4 } = require('uuid');
     const id = item.id || uuidv4();
     this._run(
-      `INSERT INTO drip_queue (id, sequenceId, contactId, email, stepIndex, subject, runAt, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO drip_queue (id, sequenceId, contactId, email, stepIndex, subject, runAt, status, attempts)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, item.sequenceId, item.contactId || '', item.email,
-       item.stepIndex || 0, item.subject || '', item.runAt, item.status || 'pending']
+       item.stepIndex || 0, item.subject || '', item.runAt, item.status || 'pending', 0]
     );
     return id;
   }
 
   getDueDripItems() {
     const now = new Date().toISOString();
+    // Recover items stuck in 'running' for more than 10 minutes (crash recovery)
+    const stuckCutoff = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    this._run(
+      "UPDATE drip_queue SET status = 'pending' WHERE status = 'running' AND updatedAt < ?",
+      [stuckCutoff]
+    );
+    // Pick up pending items and failed items with < 3 attempts (retry)
     return this._all(
-      "SELECT * FROM drip_queue WHERE status = 'pending' AND runAt <= ? ORDER BY runAt ASC LIMIT 50",
-      [now]
+      `SELECT * FROM drip_queue
+       WHERE (status = 'pending' AND runAt <= ?)
+          OR (status = 'failed' AND attempts < 3 AND runAt <= ?)
+       ORDER BY runAt ASC LIMIT 50`,
+      [now, now]
     );
   }
 
   updateDripQueueItem(id, updates) {
-    if (updates.status === 'completed' || updates.status === 'failed' ||
-        updates.status === 'skipped' || updates.status === 'running') {
+    if (updates.status === 'completed' || updates.status === 'skipped') {
       this._run(
-        'UPDATE drip_queue SET status = ?, error = ? WHERE id = ?',
+        "UPDATE drip_queue SET status = ?, error = ?, updatedAt = datetime('now') WHERE id = ?",
         [updates.status, updates.error || '', id]
+      );
+    } else if (updates.status === 'failed') {
+      this._run(
+        "UPDATE drip_queue SET status = 'failed', error = ?, attempts = attempts + 1, updatedAt = datetime('now') WHERE id = ?",
+        [updates.error || '', id]
+      );
+    } else if (updates.status === 'running') {
+      this._run(
+        "UPDATE drip_queue SET status = 'running', updatedAt = datetime('now') WHERE id = ?",
+        [id]
       );
     }
   }

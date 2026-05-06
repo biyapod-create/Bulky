@@ -61,6 +61,19 @@ describe('EmailService', () => {
     expect(html).not.toContain('{{unsubscribeLink}}');
   });
 
+  it('should attach the signed-in owner context to public tracking links', () => {
+    emailService.setTrackingBaseUrl('https://track.example.com/base');
+    emailService.setPublicTrackingContext({ ownerId: 'user-123' });
+
+    const openTracked = emailService.addOpenTracking('<p>Hello</p>', 'track-1', 'campaign-1', 'contact-1');
+    const clickTracked = emailService.addClickTracking('<a href="https://example.com/page">Link</a>', 'track-1', 'campaign-1', 'contact-1');
+    const unsubscribeUrl = emailService.createUnsubscribeUrl('campaign-1', 'contact-1', 'test@example.com');
+
+    expect(openTracked).toContain('ownerId=user-123');
+    expect(clickTracked).toContain('ownerId=user-123');
+    expect(unsubscribeUrl).toContain('ownerId=user-123');
+  });
+
   it('should fall back to mailto unsubscribe links when no external tracking domain is configured', () => {
     const html = emailService.addUnsubscribeLink(
       '<a href="{{unsubscribeLink}}">unsubscribe</a>',

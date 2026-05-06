@@ -4,6 +4,7 @@ class SyncService {
     this.entitlementService = options.entitlementService;
     this.logger = options.logger;
     this.channel = null;
+    this._syncDebounceTimer = null;
     this.status = {
       available: false,
       enabled: false,
@@ -12,10 +13,12 @@ class SyncService {
       reason: 'not_started',
       accountId: '',
       planId: '',
-      watchedTables: ['profiles', 'entitlements', 'subscriptions', 'devices'],
+      watchedTables: ['profiles', 'entitlements', 'subscriptions', 'devices', 'tracking_events'],
       lastSyncAt: null,
       lastEventAt: null,
       lastEventTable: '',
+      lastTrackingSyncAt: null,
+      importedTrackingEvents: 0,
       lastError: ''
     };
   }
@@ -44,16 +47,19 @@ class SyncService {
       const client = await this.desktopAccountService?.getSupabaseClient?.();
       await client?.removeChannel?.(currentChannel);
     } catch (error) {
-      this.logger?.warn?.('Failed to remove realtime sync channel', { error: error.message });
+      this.logger?.warn?.('Failed to remove realtime sync channel', { error: error?.message || String(error) });
     }
   }
 
   async manualSync() {
     try {
       const refreshed = await this.desktopAccountService?.refreshRemoteState?.();
+      const trackingSync = await this.desktopAccountService?.syncCloudTrackingEvents?.();
       return this._setStatus({
         lastSyncAt: new Date().toISOString(),
         lastError: '',
+        lastTrackingSyncAt: trackingSync?.enabled ? new Date().toISOString() : this.status.lastTrackingSyncAt,
+        importedTrackingEvents: Number(trackingSync?.applied || 0),
         ...(refreshed?.authenticated ? { accountId: refreshed.account?.id || this.status.accountId } : {})
       });
     } catch (error) {
@@ -135,20 +141,22 @@ class SyncService {
       { table: 'profiles', filter: `id=eq.${userId}` },
       { table: 'entitlements', filter: `user_id=eq.${userId}` },
       { table: 'subscriptions', filter: `user_id=eq.${userId}` },
-      { table: 'devices', filter: `user_id=eq.${userId}` }
+      { table: 'devices', filter: `user_id=eq.${userId}` },
+      { table: 'tracking_events', filter: `workspace_user_id=eq.${userId}` }
     ];
 
     tables.forEach(({ table, filter }) => {
       channel.on(
         'postgres_changes',
         { event: '*', schema: 'public', table, filter },
-        async () => {
+        () => {
           this._setStatus({
             lastEventAt: new Date().toISOString(),
             lastEventTable: table,
             lastError: ''
           });
-          await this.manualSync();
+          clearTimeout(this._syncDebounceTimer);
+          this._syncDebounceTimer = setTimeout(() => this.manualSync(), 500);
         }
       );
     });
@@ -212,6 +220,8 @@ class SyncService {
   }
 
   async dispose() {
+    clearTimeout(this._syncDebounceTimer);
+    this._syncDebounceTimer = null;
     await this._clearChannel();
     this._setStatus({
       connected: false,

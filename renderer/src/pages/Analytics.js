@@ -64,11 +64,12 @@ export default function Analytics({ campaignId, isActive }) {
 
   const stats = useMemo(() => {
     if (!analytics) return null;
+    // DB returns: sent, opened, clicked, bounced, softBounced, uniqueOpens, uniqueClicks
     const sent = Number(analytics.sent ?? analytics.totalSent ?? 0);
     const delivered = Number(analytics.delivered ?? sent ?? 0);
-    const opens = Number(analytics.opens ?? analytics.totalOpens ?? 0);
-    const clicks = Number(analytics.clicks ?? analytics.totalClicks ?? 0);
-    const bounces = Number(analytics.bounces ?? analytics.totalBounced ?? 0);
+    const opens = Number(analytics.uniqueOpens ?? analytics.opened ?? analytics.opens ?? analytics.totalOpens ?? 0);
+    const clicks = Number(analytics.uniqueClicks ?? analytics.clicked ?? analytics.clicks ?? analytics.totalClicks ?? 0);
+    const bounces = Number(analytics.bounced ?? analytics.bounces ?? analytics.totalBounced ?? 0);
     const unsubs = Number(analytics.unsubscribes ?? analytics.totalUnsubscribes ?? 0);
     const complaints = Number(analytics.complaints ?? 0);
     return { sent, delivered, opens, clicks, bounces, unsubs, complaints };
@@ -88,16 +89,19 @@ export default function Analytics({ campaignId, isActive }) {
     const buckets = {};
     filteredEvents.forEach((event) => {
       const date = new Date(event.timestamp || event.createdAt || Date.now());
-      const key = `${date.getMonth() + 1}/${date.getDate()}`;
-      if (!buckets[key]) {
-        buckets[key] = { label: key, opens: 0, clicks: 0, unsubscribes: 0 };
+      // Use YYYY-MM-DD as sort key to handle year boundaries correctly
+      const sortKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+      const label = `${date.getMonth() + 1}/${date.getDate()}`;
+      if (!buckets[sortKey]) {
+        buckets[sortKey] = { label, opens: 0, clicks: 0, unsubscribes: 0 };
       }
       const type = (event.type || event.eventType || '').toLowerCase();
-      if (type === 'open') buckets[key].opens += 1;
-      if (type === 'click') buckets[key].clicks += 1;
-      if (type === 'unsubscribe') buckets[key].unsubscribes += 1;
+      if (type === 'open') buckets[sortKey].opens += 1;
+      if (type === 'click') buckets[sortKey].clicks += 1;
+      if (type === 'unsubscribe') buckets[sortKey].unsubscribes += 1;
     });
-    return Object.values(buckets).slice(chartPeriod === '7D' ? -7 : chartPeriod === '30D' ? -30 : chartPeriod === '90D' ? -90 : -180);
+    const maxSlice = chartPeriod === '7D' ? 7 : chartPeriod === '30D' ? 30 : chartPeriod === '90D' ? 90 : 180;
+    return Object.entries(buckets).sort(([a], [b]) => a.localeCompare(b)).slice(-maxSlice).map(([, v]) => v);
   }, [filteredEvents, chartPeriod]);
 
   const chartMax = useMemo(() => {
@@ -141,7 +145,7 @@ export default function Analytics({ campaignId, isActive }) {
       new Date(event.timestamp || event.createdAt || Date.now()).toLocaleString(),
       event.type || event.eventType || '',
       event.email || event.recipientEmail || '',
-      event.url || '',
+      event.link || event.url || '',
       event.userAgent || ''
     ]);
     const csv = [headers, ...rows]

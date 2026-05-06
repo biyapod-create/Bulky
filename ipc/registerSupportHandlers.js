@@ -352,8 +352,8 @@ function registerSupportHandlers({
 
   // ── Memory ─────────────────────────────────────────────────────────────────
   safeHandler('ai:getMemories',  ()              => { const capabilityError = requireAiCapability(); if (capabilityError) return capabilityError; try { return db.getAllAIMemories?.() ?? []; } catch { return []; } });
-  safeHandler('ai:setMemory',    (e, { key, value }) => { const capabilityError = requireAiCapability(); if (capabilityError) return capabilityError; try { db.setAIMemory?.(sanitiseString(key, 100), sanitiseString(value, 2000)); return { success: true }; } catch (err) { return { error: err.message }; } });
-  safeHandler('ai:deleteMemory', (e, key)        => { const capabilityError = requireAiCapability(); if (capabilityError) return capabilityError; try { db.deleteAIMemory?.(sanitiseString(key, 100)); return { success: true }; } catch (err) { return { error: err.message }; } });
+  safeHandler('ai:setMemory',    (e, payload = {}) => { const { key, value } = payload || {}; const capabilityError = requireAiCapability(); if (capabilityError) return capabilityError; try { db.setAIMemory?.(sanitiseString(key, 100), sanitiseString(value, 2000)); return { success: true }; } catch (err) { return { error: err.message }; } });
+  safeHandler('ai:deleteMemory', (e, key)          => { const capabilityError = requireAiCapability(); if (capabilityError) return capabilityError; try { db.deleteAIMemory?.(sanitiseString(key ?? '', 100)); return { success: true }; } catch (err) { return { error: err.message }; } });
 
   // ── Contact actions ────────────────────────────────────────────────────────
   safeHandler('ai:getUnverifiedContacts',  ()          => { const capabilityError = requireAiCapability(); if (capabilityError) return capabilityError; try { return db.getUnverifiedContacts?.(100) ?? []; } catch { return []; } });
@@ -395,7 +395,7 @@ function registerSupportHandlers({
     if (capabilityError) return capabilityError;
     const s = sanitiseString(id, 100);
     if (!s) return { error: 'Contact ID is required' };
-    try { db.deleteContact?.(s); return { success: true }; }
+    try { db.deleteContacts([s]); return { success: true }; }
     catch (err) { return { error: err.message }; }
   });
 
@@ -601,6 +601,7 @@ function registerSupportHandlers({
           content: JSON.stringify(result.blocks),
           type: 'blocks'
         });
+        if (!id) return { error: 'Template generated but could not be saved to database' };
         return { success: true, id, name: templateName, type: 'blocks', blocks: result.blocks };
       } else {
         result = await aiService.generateContent({ prompt, tone, audience, cta });
@@ -612,6 +613,7 @@ function registerSupportHandlers({
           content: result.html || '',
           type: 'html'
         });
+        if (!id) return { error: 'Template generated but could not be saved to database' };
         return { success: true, id, name: templateName, type: 'html', subject: result.subject, html: result.html };
       }
     } catch (err) { return { error: `Template generation failed: ${err.message}` }; }
@@ -774,7 +776,7 @@ function registerSupportHandlers({
     if (type === 'deleteContact') {
       const id = sanitiseString(action.id, 100);
       if (!id) return { error: 'A contact id is required' };
-      db.deleteContact?.(id);
+      db.deleteContacts([id]);
       return { success: true, id };
     }
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   Plus, Edit2, Trash2, FileText, Copy, Search, Grid, Eye, Send, Download,
   Upload, Tag, LayoutTemplate, Wand2, Code, Loader2
@@ -296,14 +296,12 @@ function Templates({ isActive }) {
 
   useEffect(() => {
     loadTemplates();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loadTemplates]);
 
   // Refresh when becoming the active tab
   useEffect(() => {
     if (isActive) loadTemplates();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isActive]);
+  }, [isActive, loadTemplates]);
 
   // React to template mutations from other parts of the app (e.g. Composer saving a template)
   useEffect(() => {
@@ -312,8 +310,7 @@ function Templates({ isActive }) {
       if (data.type === 'templates') loadTemplates();
     });
     return unsub;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loadTemplates]);
 
   // When navigated from Composer with openBuilder flag, switch to builder tab
   useEffect(() => {
@@ -341,7 +338,7 @@ function Templates({ isActive }) {
     }
   }, [openBuilder, templateParams]);
 
-  const loadTemplates = async () => {
+  const loadTemplates = useCallback(async () => {
     try {
       if (window.electron) {
         const data = await window.electron.templates.getAll();
@@ -352,7 +349,7 @@ function Templates({ isActive }) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [addToast]);
 
   const filteredTemplates = templates.filter(t => {
     const matchesSearch = !searchQuery ||

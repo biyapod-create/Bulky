@@ -7,13 +7,15 @@ function getTrackingEvents(db, campaignId) {
 function addTrackingEvent(db, event) {
   const id = event.id || uuidv4();
   db._run(
-    `INSERT INTO tracking_events (id, campaignId, contactId, email, type, link, userAgent,
+    `INSERT INTO tracking_events (id, campaignId, contactId, trackingId, cloudEventId, email, type, link, userAgent,
       ipAddress, client, device, os, isBot, country, region)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       event.campaignId,
       event.contactId || '',
+      event.trackingId || '',
+      event.cloudEventId || '',
       event.email || '',
       event.type,
       event.link || '',

@@ -41,6 +41,10 @@ describe('SyncService', () => {
       authenticated: true,
       account: { id: 'user-1' }
     }));
+    const syncCloudTrackingEvents = jest.fn(async () => ({
+      enabled: true,
+      applied: 2
+    }));
 
     const service = new SyncService({
       desktopAccountService: {
@@ -53,7 +57,8 @@ describe('SyncService', () => {
         getCurrentSession: jest.fn(async () => ({
           user: { id: 'user-1' }
         })),
-        refreshRemoteState
+        refreshRemoteState,
+        syncCloudTrackingEvents
       },
       entitlementService: {
         getState: () => ({ plan: { id: 'pro' } }),
@@ -65,6 +70,7 @@ describe('SyncService', () => {
 
     expect(client.channel).toHaveBeenCalledWith('bulky-sync-user-1');
     expect(refreshRemoteState).toHaveBeenCalled();
+    expect(syncCloudTrackingEvents).toHaveBeenCalled();
     expect(result).toMatchObject({
       available: true,
       enabled: true,
@@ -72,7 +78,8 @@ describe('SyncService', () => {
       state: 'connected',
       reason: 'active',
       accountId: 'user-1',
-      planId: 'pro'
+      planId: 'pro',
+      importedTrackingEvents: 2
     });
   });
 });

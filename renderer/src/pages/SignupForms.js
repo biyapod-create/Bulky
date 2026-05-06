@@ -72,6 +72,11 @@ export default function SignupForms() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    const hasEmailField = formData.fields.some((f) => f.name === 'email' || f.type === 'email');
+    if (!hasEmailField) {
+      addToast('A form must have an email field to collect subscribers', 'error');
+      return;
+    }
     try {
       const payload = { ...formData, fields: formData.fields };
       if (editingId) {

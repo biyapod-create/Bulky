@@ -6,6 +6,23 @@ const http = require('http');
 const crypto = require('crypto');
 const { version: APP_VERSION } = require('./package.json');
 
+// Load .env.local into process.env at startup (dev + packaged builds)
+(function loadEnvLocal() {
+  const envPath = path.join(__dirname, '.env.local');
+  try {
+    const content = fs.readFileSync(envPath, 'utf8');
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eq = trimmed.indexOf('=');
+      if (eq < 1) continue;
+      const key = trimmed.slice(0, eq).trim();
+      const val = trimmed.slice(eq + 1).trim();
+      if (key && !(key in process.env)) process.env[key] = val;
+    }
+  } catch { /* file absent in packaged build — credentials set via Settings UI */ }
+})();
+
 const Database = require('./database/db');
 const EmailService = require('./services/emailService');
 const VerificationService = require('./services/verificationService');
@@ -528,8 +545,11 @@ async function initializeServices() {
         const decryptedKey = decryptPassword(parsed.apiKey);
         aiService.setApiKey(decryptedKey);
       }
+      if (parsed.provider) aiService.setProvider?.(parsed.provider);
       if (parsed.model) aiService.setModel(parsed.model);
-    } catch (e) {}
+    } catch (e) {
+      logger?.warn?.('Failed to restore AI settings from database', { error: e.message });
+    }
   }
 
   automationEngine = new AutomationEngine({
@@ -615,8 +635,14 @@ async function resumeInterruptedCampaigns() {
         }
       }).then(result => {
         logger.info(`Resumed campaign "${campaign.name}" completed`, result);
+        notifyDataChanged('campaigns', { source: 'resume' });
       }).catch(err => {
         logger.error(`Resumed campaign "${campaign.name}" failed`, { error: err.message });
+        campaign.status = 'failed';
+        try { db.updateCampaign(campaign); } catch (dbErr) {
+          logger.error('Failed to mark resumed campaign as failed', { error: dbErr.message });
+        }
+        notifyDataChanged('campaigns', { source: 'resume' });
       });
     }
   } catch (e) {
@@ -783,7 +809,9 @@ function startTrackingServer() {
         await trackingService.recordOpen(campaignId, contactId, trackingId, metadata);
         notifyDataChanged('campaigns', { source: 'tracking', event: 'open', campaignId });
         notifyDataChanged('tracking', { source: 'tracking', event: 'open', campaignId });
-        automationEngine?.fire?.('email_opened', { campaignId, contactId, email: '' }).catch(() => {});
+        const openLog = db?.getCampaignLogByTracking?.(campaignId, trackingId);
+        const openEmail = openLog?.email || (contactId ? db?._get?.('SELECT email FROM contacts WHERE id = ?', [contactId])?.email : '') || '';
+        automationEngine?.fire?.('email_opened', { campaignId, contactId, email: openEmail }).catch(() => {});
       } catch (e) {}
       const pixel = trackingService.getTrackingPixelBuffer();
       res.writeHead(200, {
@@ -806,7 +834,9 @@ function startTrackingServer() {
         await trackingService.recordClick(campaignId, contactId, trackingId, redirectUrl, metadata);
         notifyDataChanged('campaigns', { source: 'tracking', event: 'click', campaignId });
         notifyDataChanged('tracking', { source: 'tracking', event: 'click', campaignId });
-        automationEngine?.fire?.('link_clicked', { campaignId, contactId, email: '', linkUrl: redirectUrl }).catch(() => {});
+        const clickLog = db?.getCampaignLogByTracking?.(campaignId, trackingId);
+        const clickEmail = clickLog?.email || (contactId ? db?._get?.('SELECT email FROM contacts WHERE id = ?', [contactId])?.email : '') || '';
+        automationEngine?.fire?.('link_clicked', { campaignId, contactId, email: clickEmail, linkUrl: redirectUrl }).catch(() => {});
       } catch (e) {}
       if (redirectUrl) {
         try {

@@ -882,8 +882,9 @@ class VerificationService {
       result.status = 'risky';
       result.checks.mxRecords = false;
       result.details.dnsError = error.message;
-      result.score += 10; // Partial score
-      mxResult = { valid: false };
+      result.details.method = 'dns_only';
+      result.score += 10;
+      return result; // DNS error = risky, not invalid — don't permanently discard
     }
     result.checks.mxRecords = mxResult.valid;
 
@@ -1038,10 +1039,22 @@ class VerificationService {
 
     this._resetState();
 
-    const total = emails.length;
+    // Deduplicate while preserving order; normalise to lowercase
+    const seen = new Set();
+    const uniqueEmails = [];
+    for (const email of emails) {
+      const normalised = String(email || '').trim().toLowerCase();
+      if (normalised && !seen.has(normalised)) {
+        seen.add(normalised);
+        uniqueEmails.push(normalised);
+      }
+    }
+    const dedupedEmails = uniqueEmails;
+
+    const total = dedupedEmails.length;
     let completedCount = 0;
 
-    const results = await this._runConcurrent(emails, effectiveConcurrency, async (email, idx) => {
+    const results = await this._runConcurrent(dedupedEmails, effectiveConcurrency, async (email, idx) => {
       try {
         const domain = email.split('@')[1]?.toLowerCase();
 

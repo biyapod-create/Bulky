@@ -13,15 +13,20 @@ class EmailService {
     this.currentCampaignId = null;
     this.currentSmtpIndex = 0;
     this.trackingBaseUrl = ''; // Empty by default - requires external domain configuration
+    this.publicTrackingContext = {
+      ownerId: ''
+    };
 
-    // Circuit breaker for SMTP failures with exponential backoff
+    // Per-account circuit breakers: Map<accountId, {failures, lastFailure, state, threshold, timeout, baseTimeout}>
+    this._accountCircuits = new Map();
+    // Legacy global circuit breaker kept for getCircuitBreakerState() backwards compat
     this.circuitBreaker = {
       failures: 0,
       lastFailure: 0,
-      state: 'closed', // closed, open, half-open
-      threshold: 5, // failures before opening
-      timeout: 60000, // 1 minute before trying again
-      baseTimeout: 60000 // base timeout for reset
+      state: 'closed',
+      threshold: 5,
+      timeout: 60000,
+      baseTimeout: 60000
     };
 
     // Periodic transporter cleanup: close pooled connections for accounts that
@@ -328,6 +333,40 @@ class EmailService {
     return this.trackingBaseUrl;
   }
 
+  setPublicTrackingContext(context = {}) {
+    this.publicTrackingContext = {
+      ownerId: context?.ownerId ? String(context.ownerId).trim() : ''
+    };
+  }
+
+  setHmacSecret(secret) {
+    if (typeof secret === 'string' && secret.trim()) {
+      this.hmacSecret = secret.trim();
+    }
+  }
+
+  getPublicTrackingContext() {
+    return { ...this.publicTrackingContext };
+  }
+
+  buildTrackedUrl(pathname, extraSearchParams = {}) {
+    const baseUrl = `${this.getTrackingBaseUrl().replace(/\/+$/, '')}/${String(pathname || '').replace(/^\/+/, '')}`;
+    const trackedUrl = new URL(baseUrl);
+
+    for (const [key, value] of Object.entries(extraSearchParams || {})) {
+      if (value === null || value === undefined || value === '') {
+        continue;
+      }
+      trackedUrl.searchParams.set(key, String(value));
+    }
+
+    if (this.publicTrackingContext.ownerId) {
+      trackedUrl.searchParams.set('ownerId', this.publicTrackingContext.ownerId);
+    }
+
+    return trackedUrl.toString();
+  }
+
   normalizeTrackingBaseUrl(baseUrl) {
     if (!baseUrl || typeof baseUrl !== 'string') return null;
 
@@ -411,10 +450,10 @@ class EmailService {
     const baseUrl = this.getTrackingBaseUrl();
     if (this.isPrivateTrackingBaseUrl(baseUrl)) return null;
 
-    const params = new URLSearchParams({ email: email || '' });
+    const params = { email: email || '' };
     const token = this.generateUnsubscribeToken(email, campaignId);
-    if (token) params.set('token', token);
-    return `${baseUrl}/unsubscribe/${campaignId}/${contactId || 'unknown'}?${params.toString()}`;
+    if (token) params.token = token;
+    return this.buildTrackedUrl(`unsubscribe/${campaignId}/${contactId || 'unknown'}`, params);
   }
 
   addOpenTracking(html, trackingId, campaignId, contactId) {
@@ -423,7 +462,7 @@ class EmailService {
     const baseUrl = this.getTrackingBaseUrl();
     if (this.isPrivateTrackingBaseUrl(baseUrl)) return html;
 
-    const trackingUrl = `${baseUrl}/track/open/${campaignId}/${contactId || 'unknown'}/${trackingId}`;
+    const trackingUrl = this.buildTrackedUrl(`track/open/${campaignId}/${contactId || 'unknown'}/${trackingId}`);
     const trackingPixel = `<img src="${trackingUrl}" width="1" height="1" style="display:none;" alt="" />`;
     if (html.toLowerCase().includes('</body>')) {
       return html.replace(/<\/body>/i, `${trackingPixel}</body>`);
@@ -446,8 +485,10 @@ class EmailService {
           url.toLowerCase().includes('unsubscribe') || url.toLowerCase().includes('optout')) {
         return match;
       }
-      const encodedUrl = encodeURIComponent(url);
-      const trackedUrl = `${baseUrl}/track/click/${campaignId}/${contactId || 'unknown'}/${trackingId}?url=${encodedUrl}`;
+      const trackedUrl = this.buildTrackedUrl(
+        `track/click/${campaignId}/${contactId || 'unknown'}/${trackingId}`,
+        { url }
+      );
       return `<a ${before}${trackedUrl}${after}`;
     });
   }
@@ -477,19 +518,24 @@ class EmailService {
       for (let i = 0; i < accounts.length; i++) {
         const idx = (this.currentSmtpIndex + i) % accounts.length;
         const account = accounts[idx];
-        if (account.sentToday < account.dailyLimit) {
-          this.currentSmtpIndex = (idx + 1) % accounts.length;
-          // Decrypt password so SMTP rotation uses correct credentials
-          if (this.decryptPassword && typeof this.decryptPassword === 'function' && account.password) {
-            return {
-              account: { ...account, password: this.decryptPassword(account.password) },
-              exhausted: false
-            };
-          }
-          return { account, exhausted: false };
+        // Skip accounts that are at their daily limit or have an open circuit breaker
+        if (account.sentToday >= account.dailyLimit) continue;
+        if (this._isAccountCircuitOpen(account.id)) continue;
+
+        this.currentSmtpIndex = (idx + 1) % accounts.length;
+        // Decrypt password so SMTP rotation uses correct credentials
+        if (this.decryptPassword && typeof this.decryptPassword === 'function' && account.password) {
+          return {
+            account: { ...account, password: this.decryptPassword(account.password) },
+            exhausted: false
+          };
         }
+        return { account, exhausted: false };
       }
-      return { account: null, exhausted: true };
+
+      // If all accounts are circuit-broken but not daily-limit-exhausted, that's a circuit issue
+      const allExhausted = accounts.every((a) => a.sentToday >= a.dailyLimit);
+      return { account: null, exhausted: allExhausted };
     } catch (e) {
       return { account: null, exhausted: false };
     }
@@ -653,16 +699,27 @@ class EmailService {
     this.currentCampaignId = campaign.id;
     const reportProgress = typeof onProgress === 'function' ? onProgress : () => {};
 
+    // Pre-load blacklist and unsubscribe sets once for the entire campaign (O(1) per-email checks)
+    const blacklistSet = this.db.getBlacklistSet ? this.db.getBlacklistSet() : new Set();
+    const unsubscribeSet = this.db.getUnsubscribeSet ? this.db.getUnsubscribeSet() : new Set();
+
+    const isBlacklistedFast = (email) => {
+      const e = String(email || '').toLowerCase();
+      if (blacklistSet.has(e)) return true;
+      const domain = e.includes('@') ? `@${e.split('@')[1]}` : '';
+      return domain ? blacklistSet.has(domain) : false;
+    };
+
     // Filter out blacklisted, unsubscribed, and previously bounced contacts
     const validContacts = [];
     const skippedReasons = { blacklisted: 0, unsubscribed: 0, bounced: 0 };
-    
+
     for (const contact of contacts) {
-      if (this.db.isBlacklisted(contact.email)) {
+      if (isBlacklistedFast(contact.email)) {
         skippedReasons.blacklisted++;
         continue;
       }
-      if (this.db.isUnsubscribed(contact.email)) {
+      if (unsubscribeSet.has(String(contact.email || '').toLowerCase())) {
         skippedReasons.unsubscribed++;
         continue;
       }
@@ -757,6 +814,19 @@ class EmailService {
 
         if (this.isStopped) break;
 
+        // Re-check unsubscribe/blacklist status per-email to catch mid-campaign opt-outs.
+        // Refresh from DB every 100 emails to pick up new unsubscribes without hammering the DB.
+        if (sentCount > 0 && sentCount % 100 === 0) {
+          const freshUnsub = this.db.getUnsubscribeSet ? this.db.getUnsubscribeSet() : null;
+          const freshBl = this.db.getBlacklistSet ? this.db.getBlacklistSet() : null;
+          if (freshUnsub) for (const e of freshUnsub) unsubscribeSet.add(e);
+          if (freshBl) for (const e of freshBl) blacklistSet.add(e);
+        }
+        if (isBlacklistedFast(contact.email) || unsubscribeSet.has(String(contact.email || '').toLowerCase())) {
+          skippedReasons.unsubscribed = (skippedReasons.unsubscribed || 0) + 1;
+          continue;
+        }
+
         // Determine A/B variant
         let subject = campaign.subject;
         let content = campaign.content;
@@ -780,16 +850,15 @@ class EmailService {
         };
 
         try {
-          // Circuit breaker check -- throws if SMTP is in a prolonged failure state
-          this._circuitCheck();
-
           let activeTransporter = transporter;
           let activeSettings = smtpSettings;
-          
+          let activeAccountId = smtpSettings?.id || null;
+
           const rotation = await this.getNextSmtpAccount();
           if (rotation.account) {
             activeTransporter = this.getTransporter(rotation.account);
             activeSettings = rotation.account;
+            activeAccountId = rotation.account.id;
             this.db.incrementSmtpSentCount(rotation.account.id);
           } else if (rotation.exhausted) {
             const rateLimitError = new Error('All active SMTP accounts have reached their daily limits');
@@ -797,14 +866,16 @@ class EmailService {
             throw rateLimitError;
           } else {
             // Rotation unavailable in legacy single-account mode; use the provided settings
-            const primaryId = smtpSettings?.id;
-            if (primaryId) this.db.incrementSmtpSentCount(primaryId);
+            if (activeAccountId) this.db.incrementSmtpSentCount(activeAccountId);
           }
 
+          // Per-account circuit breaker check — only blocks this account, not others
+          this._circuitCheck(activeAccountId);
+
           const result = await this.sendSingleEmail(activeTransporter, activeSettings, contact, subject, content, campaign, variant);
-          
-          // Success -- close the circuit if it was probing
-          this._circuitSuccess();
+
+          // Success — close the circuit for this account if it was probing
+          this._circuitSuccess(activeAccountId);
 
           sentCount++;
           sendResult = {
@@ -817,7 +888,6 @@ class EmailService {
           };
 
         } catch (error) {
-          // Circuit breaker open -- skip this contact without counting as an SMTP bounce
           if (error.code === 'SMTP_DAILY_LIMIT_REACHED') {
             failedCount++;
             this.isStopped = true;
@@ -826,13 +896,15 @@ class EmailService {
             sendResult.failureReason = error.message;
             sendResult.smtpResponse = error.message;
           } else if (error.message && error.message.startsWith('Circuit breaker open')) {
+            // Per-account circuit open — skip this contact, let rotation pick another account
             failedCount++;
             sendResult.status = 'failed';
             sendResult.failureType = 'circuit_open';
             sendResult.failureReason = error.message;
           } else {
-            // Record the SMTP failure in the circuit breaker
-            this._circuitFailure();
+            // Record the SMTP failure against the active account's circuit breaker
+            const failedAccountId = smtpSettings?.id || null;
+            this._circuitFailure(failedAccountId);
 
             // Parse the error to determine bounce type
             const errorInfo = this.parseSmtpError(error);
@@ -843,11 +915,13 @@ class EmailService {
               
               // Update contact bounce count and add to blacklist after 2 hard bounces
               this.db.incrementContactBounce(contact.id, errorInfo.failureReason);
-              if (contact.bounceCount >= 1) {
-                this.db.addToBlacklist({ 
-                  email: contact.email, 
-                  reason: `Hard bounce: ${errorInfo.failureReason}`, 
-                  source: 'auto_bounce' 
+              const freshContact = this.db._get('SELECT bounceCount FROM contacts WHERE id = ?', [contact.id]);
+              const updatedBounceCount = freshContact ? (freshContact.bounceCount || 0) : (contact.bounceCount || 0) + 1;
+              if (updatedBounceCount >= 2) {
+                this.db.addToBlacklist({
+                  email: contact.email,
+                  reason: `Hard bounce: ${errorInfo.failureReason}`,
+                  source: 'auto_bounce'
                 });
               }
             } else if (errorInfo.failureType === 'soft_bounce') {
@@ -980,6 +1054,7 @@ class EmailService {
       currentCampaignId: this.currentCampaignId,
       currentSmtpIndex: this.currentSmtpIndex,
       trackingBaseUrl: this.trackingBaseUrl,
+      publicTrackingContext: { ...this.publicTrackingContext },
       sendingMode: this.sendingMode,
       companyAddress: this.companyAddress,
       circuitBreaker: { ...this.circuitBreaker }
@@ -998,6 +1073,9 @@ class EmailService {
     if (typeof state.trackingBaseUrl === 'string' && state.trackingBaseUrl.trim()) {
       this.trackingBaseUrl = state.trackingBaseUrl.trim();
     }
+    if (state.publicTrackingContext && typeof state.publicTrackingContext === 'object') {
+      this.setPublicTrackingContext(state.publicTrackingContext);
+    }
     if (typeof state.sendingMode === 'string' && state.sendingMode.trim()) {
       this.sendingMode = state.sendingMode.trim();
     }
@@ -1015,18 +1093,33 @@ class EmailService {
   }
 
   // ============================================================
-  // Circuit Breaker -- protects against cascading SMTP failures
+  // Circuit Breaker -- per-account protection against cascading SMTP failures
   // States: closed (normal) -> open (failing) -> half-open (probe)
   // ============================================================
 
-  _circuitCheck() {
-    const cb = this.circuitBreaker;
-    if (cb.state === 'closed') return; // fast path
+  _getAccountCircuit(accountId) {
+    if (!accountId) return this.circuitBreaker; // fallback for legacy single-account
+    if (!this._accountCircuits.has(accountId)) {
+      this._accountCircuits.set(accountId, {
+        failures: 0,
+        lastFailure: 0,
+        state: 'closed',
+        threshold: 5,
+        timeout: 60000,
+        baseTimeout: 60000
+      });
+    }
+    return this._accountCircuits.get(accountId);
+  }
+
+  _circuitCheck(accountId) {
+    const cb = this._getAccountCircuit(accountId);
+    if (cb.state === 'closed') return;
 
     if (cb.state === 'open') {
       const elapsed = Date.now() - cb.lastFailure;
       if (elapsed >= cb.timeout) {
-        cb.state = 'half-open'; // allow one probe
+        cb.state = 'half-open';
       } else {
         const remainSecs = Math.ceil((cb.timeout - elapsed) / 1000);
         throw new Error(`Circuit breaker open — SMTP failures exceeded threshold. Retry in ${remainSecs}s`);
@@ -1035,31 +1128,48 @@ class EmailService {
     // half-open: fall through and allow the send attempt
   }
 
-  _circuitSuccess() {
-    const cb = this.circuitBreaker;
+  _circuitSuccess(accountId) {
+    const cb = this._getAccountCircuit(accountId);
     if (cb.state !== 'closed') {
       cb.state = 'closed';
       cb.failures = 0;
       cb.lastFailure = 0;
-      cb.timeout = cb.baseTimeout; // reset backoff
+      cb.timeout = cb.baseTimeout;
     }
+    // Keep legacy global in sync
+    if (!accountId) Object.assign(this.circuitBreaker, cb);
   }
 
-  _circuitFailure() {
-    const cb = this.circuitBreaker;
+  _circuitFailure(accountId) {
+    const cb = this._getAccountCircuit(accountId);
     cb.failures++;
     cb.lastFailure = Date.now();
     if (cb.state === 'half-open' || cb.failures >= cb.threshold) {
       cb.state = 'open';
-      // Exponential backoff capped at 10 minutes.
-      // trips starts at 1 on the first opening so backoff increases immediately.
       const trips = Math.floor(cb.failures / cb.threshold);
       cb.timeout = Math.min(cb.baseTimeout * Math.pow(2, trips), 10 * 60 * 1000);
     }
+    // Keep legacy global in sync for getCircuitBreakerState()
+    if (!accountId) Object.assign(this.circuitBreaker, cb);
+  }
+
+  _isAccountCircuitOpen(accountId) {
+    const cb = this._getAccountCircuit(accountId);
+    if (cb.state === 'closed' || cb.state === 'half-open') return false;
+    const elapsed = Date.now() - cb.lastFailure;
+    if (elapsed >= cb.timeout) {
+      cb.state = 'half-open';
+      return false;
+    }
+    return true;
   }
 
   getCircuitBreakerState() {
-    return { ...this.circuitBreaker };
+    const allStates = { global: { ...this.circuitBreaker } };
+    for (const [id, cb] of this._accountCircuits.entries()) {
+      allStates[id] = { ...cb };
+    }
+    return allStates;
   }
 
   // Generate HMAC token for unsubscribe link security

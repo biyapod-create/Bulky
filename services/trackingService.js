@@ -382,6 +382,7 @@ class TrackingService {
         this.db.addTrackingEvent({
           campaignId,
           contactId: recipientId,
+          trackingId,
           email,
           type: 'open',
           userAgent: metadata.userAgent || null,
@@ -458,6 +459,7 @@ class TrackingService {
         this.db.addTrackingEvent({
           campaignId,
           contactId: recipientId,
+          trackingId,
           email,
           type: 'click',
           link: safeRedirectUrl,

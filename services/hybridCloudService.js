@@ -235,11 +235,14 @@ class HybridCloudService {
   }
 
   async getDiagnostics() {
-    const [supabase, cloudflare, paystack] = await Promise.all([
+    const [supabaseResult, cloudflareResult, paystackResult] = await Promise.allSettled([
       this.testSupabaseConnection(),
       this.testCloudflareEndpoints(),
       this.testPaystackConfig()
     ]);
+    const supabase = supabaseResult.status === 'fulfilled' ? supabaseResult.value : { ok: false, error: supabaseResult.reason?.message || 'probe failed' };
+    const cloudflare = cloudflareResult.status === 'fulfilled' ? cloudflareResult.value : { ok: false, error: cloudflareResult.reason?.message || 'probe failed' };
+    const paystack = paystackResult.status === 'fulfilled' ? paystackResult.value : { ok: false, error: paystackResult.reason?.message || 'probe failed' };
 
     return {
       generatedAt: new Date().toISOString(),

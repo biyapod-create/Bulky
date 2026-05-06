@@ -147,16 +147,17 @@ function Settings({ isActive }) {
   const { pageParams, navigateTo } = useNavigation();
   const [activeTab, setActiveTab] = useState('general');
 
-  // Deep-link: when navigated to /settings?tab=X or with pageParams, open that tab
+  // Deep-link: when navigated to /settings?tab=X or with pageParams, open that tab.
+  // Guard AI tab here so we never flash the wrong tab before correcting.
   useEffect(() => {
     const param = pageParams?.['/settings']?.tab;
-    if (param && VALID_TABS.includes(param)) setActiveTab(param);
-  }, [pageParams]);
-  useEffect(() => {
-    if (activeTab === 'ai' && !hasCapability('aiAssistant')) {
+    if (!param || !VALID_TABS.includes(param)) return;
+    if (param === 'ai' && !hasCapability('aiAssistant')) {
       setActiveTab('general');
+    } else {
+      setActiveTab(param);
     }
-  }, [activeTab, hasCapability]);
+  }, [pageParams, hasCapability]);
   const [loading, setLoading] = useState(true);
   const [testing, setTesting] = useState(false);
   const [testingAccountId, setTestingAccountId] = useState(null);
@@ -1206,7 +1207,8 @@ function Settings({ isActive }) {
   const handleDeleteAccount = async (id) => {
     if (!window.confirm('Delete this SMTP account?')) return;
     try {
-      await window.electron.smtpAccounts.delete(id);
+      const result = await window.electron.smtpAccounts.delete(id);
+      if (result?.error) { addToast('Failed to delete account: ' + result.error, 'error'); return; }
       addToast('Account deleted', 'success');
       loadSmtpAccounts();
       loadSmtpOverview();
@@ -1253,7 +1255,8 @@ function Settings({ isActive }) {
 
   const handleSaveApp = async () => {
     try {
-      await window.electron.settings.save(appSettings);
+      const result = await window.electron.settings.save(appSettings);
+      if (result?.error) { addToast('Failed to save settings: ' + result.error, 'error'); return; }
       addToast('Settings saved', 'success');
     } catch (error) {
       addToast('Failed to save settings', 'error');
@@ -1262,7 +1265,8 @@ function Settings({ isActive }) {
 
   const handleSaveWarmup = async () => {
     try {
-      await window.electron.settings.saveWarmup(warmupSettings);
+      const result = await window.electron.settings.saveWarmup(warmupSettings);
+      if (result?.error) { addToast('Failed to save warmup settings: ' + result.error, 'error'); return; }
       addToast('Warmup settings saved', 'success');
     } catch (error) {
       addToast('Failed to save warmup settings', 'error');
@@ -1271,7 +1275,8 @@ function Settings({ isActive }) {
 
   const handleSaveDeliverability = async () => {
     try {
-      await window.electron.settings.saveDeliverability(deliverabilityInfo);
+      const result = await window.electron.settings.saveDeliverability(deliverabilityInfo);
+      if (result?.error) { addToast('Failed to save deliverability settings: ' + result.error, 'error'); return; }
       loadSmtpOverview();
       addToast('Deliverability settings saved', 'success');
     } catch (error) {
