@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Save, Eye, Code, FileText, ShieldCheck, Edit3, Tag, Users, ChevronDown, ChevronUp, Wand2, Layers, ExternalLink, Beaker, Sparkles, FolderOpen, Monitor, Search, X } from 'lucide-react';
+import { Edit3 } from 'lucide-react';
 import { useToast } from '../components/ToastContext';
 import { useNavigation } from '../components/NavigationContext';
-import EmailEditor from '../components/EmailEditor';
-import EmailPreview from '../components/EmailPreview';
-import { buildEmailPreviewDocument } from '../utils/emailPreview';
+import ComposerHeader from '../features/composer/ComposerHeader';
+import ComposerSettingsPanel from '../features/composer/ComposerSettingsPanel';
+import ComposerEditorPanel from '../features/composer/ComposerEditorPanel';
+const { evaluateContentReadiness } = require('../utils/contentReadiness');
 
 function Composer({ isActive }) {
   const { navigateTo, pageParams } = useNavigation();
@@ -29,11 +30,14 @@ function Composer({ isActive }) {
   const tokenPickerRef = useRef(null);
 
   const [dataLoading, setDataLoading] = useState(true);
-  const [showFullPreview, setShowFullPreview] = useState(false);
   const [aiInsights, setAiInsights] = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiSubjectSuggestions, setAiSubjectSuggestions] = useState([]);
   const [showAiGenerate, setShowAiGenerate] = useState(false);
+  const [deliverabilityInfo, setDeliverabilityInfo] = useState({});
+  const [smtpAccounts, setSmtpAccounts] = useState([]);
+  const [smtpSettings, setSmtpSettings] = useState({});
+  const [smtpHealth, setSmtpHealth] = useState([]);
   const [aiBrief, setAiBrief] = useState({
     prompt: '',
     tone: 'professional',
@@ -141,16 +145,24 @@ function Composer({ isActive }) {
   const loadData = useCallback(async () => {
     try {
       if (window.electron) {
-        const [templatesData, listsData, tagsData, contactsData] = await Promise.all([
+        const [templatesData, listsData, tagsData, contactsData, deliverabilityData, smtpAccountsData, smtpSettingsData, dashboardData] = await Promise.all([
           window.electron.templates.getAll(),
           window.electron.lists.getAll(),
           window.electron.tags.getAll(),
-          window.electron.contacts.getAll()
+          window.electron.contacts.getAll(),
+          window.electron.settings?.getDeliverability?.() || Promise.resolve({}),
+          window.electron.smtpAccounts?.getAll?.() || Promise.resolve([]),
+          window.electron.smtp?.get?.() || Promise.resolve({}),
+          window.electron.stats?.getDashboard?.() || Promise.resolve({})
         ]);
         setTemplates(Array.isArray(templatesData) ? templatesData : []);
         setLists(Array.isArray(listsData) ? listsData : []);
         setTags(Array.isArray(tagsData) ? tagsData : []);
         setContactsCatalog(Array.isArray(contactsData) ? contactsData : []);
+        setDeliverabilityInfo(deliverabilityData || {});
+        setSmtpAccounts(Array.isArray(smtpAccountsData) ? smtpAccountsData : []);
+        setSmtpSettings(smtpSettingsData || {});
+        setSmtpHealth(Array.isArray(dashboardData?.smtpHealth) ? dashboardData.smtpHealth : []);
       }
     } catch (error) {
       addToast('Failed to load templates and lists', 'error');
@@ -521,6 +533,43 @@ function Composer({ isActive }) {
     return '#ef4444';
   };
 
+  const contentReadiness = useMemo(() => evaluateContentReadiness({
+    subject: campaign.subject,
+    content: campaign.content,
+    spamScore,
+    recipientBreakdown,
+    deliverabilityInfo,
+    smtpAccounts,
+    smtpSettings,
+    smtpHealth
+  }), [
+    campaign.subject,
+    campaign.content,
+    spamScore,
+    recipientBreakdown,
+    deliverabilityInfo,
+    smtpAccounts,
+    smtpSettings,
+    smtpHealth
+  ]);
+
+  const activeSmtpCount = useMemo(
+    () => (smtpAccounts || []).filter((account) => account.isActive !== false).length,
+    [smtpAccounts]
+  );
+
+  const readinessTone = contentReadiness.blockers.length > 0
+    ? 'error'
+    : contentReadiness.warnings.length > 0
+      ? 'warning'
+      : 'success';
+
+  const readinessLabel = contentReadiness.blockers.length > 0
+    ? 'Blocked'
+    : contentReadiness.warnings.length > 0
+      ? 'Needs review'
+      : 'Ready';
+
   // AI Functions
   const handleAiAnalyze = useCallback(async () => {
     try {
@@ -551,6 +600,11 @@ function Composer({ isActive }) {
     } catch (e) { addToast('AI request failed', 'error'); }
     finally { setAiLoading(false); }
   };
+
+  const applySuggestedSubject = useCallback((subject) => {
+    setCampaign((prev) => ({ ...prev, subject }));
+    addToast('Subject applied', 'success');
+  }, [addToast]);
 
   const handleAiGenerate = async () => {
     if (!aiBrief.prompt) { addToast('Enter a prompt', 'error'); return; }
@@ -587,826 +641,81 @@ function Composer({ isActive }) {
   }
 
   return (
-    <div>
-      <div className="page-header flex justify-between items-center">
-        <div>
-          <h1 className="page-title">Email Composer</h1>
-          <p className="page-subtitle">Create and design your email content.</p>
-        </div>
-        <div className="flex gap-2">
-          <button className="btn btn-outline" onClick={handleOpenInBuilder} title="Open in Template Builder">
-            <ExternalLink size={16} /> Open in Builder
-          </button>
-          <button className="btn btn-outline" onClick={handleSaveAsTemplate}>
-            <FileText size={16} /> Save as Template
-          </button>
-          <button className="btn btn-primary" onClick={handleSaveCampaign}>
-            <Save size={16} /> Save Campaign
-          </button>
-        </div>
-      </div>
+    <div className="page-container page-composer">
+      <ComposerHeader
+        handleOpenInBuilder={handleOpenInBuilder}
+        handleSaveAsTemplate={handleSaveAsTemplate}
+        handleSaveCampaign={handleSaveCampaign}
+        recipientCount={recipientCount}
+        recipientMode={recipientMode}
+        activeSmtpCount={activeSmtpCount}
+        smtpAccountsCount={smtpAccounts.length}
+        spamScore={spamScore}
+        readinessTone={readinessTone}
+        readinessLabel={readinessLabel}
+      />
 
-      <div className="composer-grid" style={{ gridTemplateColumns: settingsCollapsed ? '48px 1fr' : '340px 1fr' }}>
-        {/* Left Panel - Settings */}
-        <div className="card" style={{ overflow: 'hidden auto', transition: 'all 0.3s', position: 'relative', minWidth: 0 }}>
-          {/* Collapse toggle */}
-          <button
-            onClick={() => setSettingsCollapsed(!settingsCollapsed)}
-            style={{
-              position: 'absolute', top: '12px', right: '12px', background: 'none', border: 'none',
-              cursor: 'pointer', color: 'var(--text-muted)', padding: '4px', zIndex: 1
-            }}
-            title={settingsCollapsed ? 'Expand settings' : 'Collapse settings'}
-          >
-            {settingsCollapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
-          </button>
-
-          {settingsCollapsed ? (
-            <div style={{ writingMode: 'vertical-rl', textOrientation: 'mixed', padding: '16px 8px', color: 'var(--text-muted)', fontSize: '12px', cursor: 'pointer' }}
-              onClick={() => setSettingsCollapsed(false)}
-            >
-              Campaign Settings
-            </div>
-          ) : (
-            <>
-              <h3 className="card-title mb-4">Campaign Settings</h3>
-
-              <div className="form-group">
-                <label className="form-label">Campaign Name *</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="Auto-generated from subject"
-                  value={campaign.name}
-                  onChange={(e) => setCampaign({ ...campaign, name: e.target.value })}
-                />
-                {!campaign.name && campaign.subject && (
-                  <small className="text-muted">Will auto-generate from subject line</small>
-                )}
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">Recipients</label>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', marginBottom: '12px' }}>
-                  <button
-                    type="button"
-                    className={`btn ${recipientMode === 'all' ? 'btn-primary' : 'btn-outline'}`}
-                    onClick={() => setRecipientMode('all')}
-                  >
-                    <Users size={14} /> All Contacts
-                  </button>
-                  <button
-                    type="button"
-                    className={`btn ${recipientMode === 'list' ? 'btn-primary' : 'btn-outline'}`}
-                    onClick={() => setRecipientMode('list')}
-                  >
-                    <FolderOpen size={14} /> By List
-                  </button>
-                  <button
-                    type="button"
-                    className={`btn ${recipientMode === 'manual' ? 'btn-primary' : 'btn-outline'}`}
-                    onClick={() => setRecipientMode('manual')}
-                  >
-                    <Monitor size={14} /> Individual
-                  </button>
-                </div>
-                {recipientMode === 'all' && (
-                  <div style={{ padding: '12px 14px', borderRadius: '10px', background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', fontSize: '13px', lineHeight: 1.6 }}>
-                    This campaign will target every active contact in Bulky. List and tag filters are ignored in this mode.
-                  </div>
-                )}
-                {recipientMode === 'manual' ? (
-                  <>
-                    <div style={{ padding: '14px', borderRadius: '12px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)', marginBottom: '10px' }}>
-                      <label className="form-label" style={{ marginBottom: '8px' }}>Find Individual Contacts</label>
-                      <div style={{ position: 'relative', marginBottom: '10px' }}>
-                        <Search size={14} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
-                        <input
-                          type="text"
-                          className="form-input"
-                          style={{ paddingLeft: '34px' }}
-                          placeholder="Search contacts by email, name, or company"
-                          value={individualSearch}
-                          onChange={(e) => setIndividualSearch(e.target.value)}
-                        />
-                      </div>
-                      {selectedManualEmails.length > 0 && (
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '10px' }}>
-                          {selectedManualEmails.map((email) => (
-                            <button
-                              key={email}
-                              type="button"
-                              className="btn btn-outline btn-sm"
-                              onClick={() => removeIndividualRecipient(email)}
-                              style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', maxWidth: '100%' }}
-                            >
-                              <span style={{ maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{email}</span>
-                              <X size={12} />
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                      <div style={{ display: 'grid', gap: '8px' }}>
-                        {filteredIndividualContacts.length > 0 ? filteredIndividualContacts.map((contact) => {
-                          const displayName = `${contact.firstName || ''} ${contact.lastName || ''}`.trim();
-                          return (
-                            <button
-                              key={contact.id}
-                              type="button"
-                              className="btn btn-outline"
-                              onClick={() => toggleIndividualRecipient(contact.email)}
-                              style={{ justifyContent: 'space-between', textAlign: 'left' }}
-                            >
-                              <span style={{ display: 'grid', gap: '2px' }}>
-                                <span>{displayName || contact.email}</span>
-                                <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{contact.email}{contact.company ? ` • ${contact.company}` : ''}</span>
-                              </span>
-                              <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Add</span>
-                            </button>
-                          );
-                        }) : (
-                          <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                            {individualSearch.trim() ? 'No matching contacts found.' : 'Search to add specific contacts to this campaign.'}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                    <textarea
-                      className="form-textarea"
-                      rows={4}
-                      placeholder="You can also paste email addresses separated by commas or new lines"
-                      value={manualEmails}
-                      onChange={(e) => setManualEmails(e.target.value)}
-                    />
-                    <small className="text-muted">
-                      Individual mode stores the exact recipients for this campaign, so it can be saved and sent later without rebuilding the audience.
-                    </small>
-                  </>
-                ) : recipientMode === 'list' ? (
-                  <select
-                    className="form-select"
-                    value={campaign.listId}
-                    onChange={(e) => setCampaign({ ...campaign, listId: e.target.value })}
-                  >
-                    <option value="">All Lists</option>
-                    {lists.map(list => (
-                      <option key={list.id} value={list.id}>{list.name}</option>
-                    ))}
-                  </select>
-                ) : null}
-              </div>
-
-              {/* Tag Filtering */}
-              {recipientMode === 'list' && tags.length > 0 && (
-                <div className="form-group">
-                  <label className="form-label"><Tag size={14} style={{ marginRight: '4px' }} /> Filter by Tags</label>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '8px' }}>
-                    {tags.map(tag => (
-                      <button
-                        key={tag.id}
-                        type="button"
-                        onClick={() => toggleTag(tag.id)}
-                        style={{
-                          padding: '4px 10px', borderRadius: '12px',
-                          border: campaign.selectedTags?.includes(tag.id) ? 'none' : '1px solid var(--border)',
-                          background: campaign.selectedTags?.includes(tag.id) ? tag.color : 'var(--bg-secondary)',
-                          color: campaign.selectedTags?.includes(tag.id) ? '#fff' : 'var(--text)',
-                          fontSize: '12px', cursor: 'pointer', transition: 'all 0.2s'
-                        }}
-                      >
-                        {tag.name}
-                      </button>
-                    ))}
-                  </div>
-                  {campaign.selectedTags?.length > 0 && (
-                    <button
-                      type="button"
-                      className="btn btn-outline btn-sm mt-2"
-                      onClick={() => setCampaign({ ...campaign, selectedTags: [] })}
-                      style={{ fontSize: '11px' }}
-                    >
-                      Clear Tags
-                    </button>
-                  )}
-                </div>
-              )}
-
-              {/* Enhanced Recipient Count with Breakdown */}
-              <div style={{
-                background: 'var(--bg-tertiary)', borderRadius: '8px', padding: '12px', marginBottom: '16px'
-              }}>
-                <div className="flex items-center gap-2 mb-2">
-                  <Users size={18} style={{ color: 'var(--accent)' }} />
-                  <div style={{ fontSize: '20px', fontWeight: '600' }}>{recipientCount.toLocaleString()}</div>
-                  <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                    {recipientMode === 'manual'
-                      ? 'individual recipients locked for this campaign'
-                      : recipientMode === 'all'
-                      ? 'all available contacts'
-                      : campaign.selectedTags?.length > 0
-                      ? `recipients (${campaign.selectedTags.length} tag${campaign.selectedTags.length > 1 ? 's' : ''} applied)`
-                      : 'total recipients'}
-                  </div>
-                </div>
-                {(recipientBreakdown.blacklisted > 0 || recipientBreakdown.unsubscribed > 0) && (
-                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', borderTop: '1px solid var(--border)', paddingTop: '8px', marginTop: '4px' }}>
-                    <div className="flex justify-between">
-                      <span style={{ color: '#22c55e' }}>Valid: {recipientBreakdown.valid}</span>
-                      <span style={{ color: '#f59e0b' }}>Blacklisted: {recipientBreakdown.blacklisted}</span>
-                      <span style={{ color: '#ef4444' }}>Unsub: {recipientBreakdown.unsubscribed}</span>
-                    </div>
-                  </div>
-                )}
-                {recipientCount > 0 && campaign.batchSize > 0 && (
-                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '6px' }}>
-                    ~{Math.ceil(recipientCount / campaign.batchSize)} batches, ~{Math.ceil(recipientCount / campaign.batchSize) * campaign.delayMinutes} min total
-                  </div>
-                )}
-              </div>
-
-              {/* Load Template with Categories */}
-              <div className="form-group">
-                <label className="form-label"><FolderOpen size={14} style={{ marginRight: '4px' }} /> Load Template</label>
-                {Object.keys(templateCategories).length > 0 ? (
-                  <select
-                    className="form-select"
-                    onChange={(e) => handleLoadTemplate(e.target.value)}
-                    value={selectedTemplateId}
-                  >
-                    <option value="">Select template...</option>
-                    {Object.entries(templateCategories).map(([category, catTemplates]) => (
-                      <optgroup key={category} label={category}>
-                        {catTemplates.map(template => (
-                          <option key={template.id} value={template.id}>{template.name}</option>
-                        ))}
-                      </optgroup>
-                    ))}
-                  </select>
-                ) : (
-                  <select
-                    className="form-select"
-                    onChange={(e) => handleLoadTemplate(e.target.value)}
-                    value={selectedTemplateId}
-                  >
-                    <option value="">Select template...</option>
-                    {templates.map(template => (
-                      <option key={template.id} value={template.id}>{template.name}</option>
-                    ))}
-                  </select>
-                )}
-              </div>
-
-              <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '20px 0' }} />
-
-              {/* A/B Testing Toggle */}
-              <div className="form-group">
-                <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
-                  <input
-                    type="checkbox"
-                    checked={isABTest}
-                    onChange={(e) => {
-                      setIsABTest(e.target.checked);
-                      setCampaign(prev => ({ ...prev, isABTest: e.target.checked }));
-                    }}
-                  />
-                  <Beaker size={14} /> Enable A/B Testing
-                </label>
-                {isABTest && (
-                  <div style={{ marginTop: '8px' }}>
-                    <label className="form-label" style={{ fontSize: '12px' }}>
-                      Test Split: {campaign.abTestPercent}% / {100 - campaign.abTestPercent}%
-                    </label>
-                    <input
-                      type="range"
-                      min="10" max="90" step="5"
-                      value={campaign.abTestPercent}
-                      onChange={(e) => setCampaign({ ...campaign, abTestPercent: parseInt(e.target.value) })}
-                      style={{ width: '100%' }}
-                    />
-                    <div className="flex justify-between text-sm text-muted">
-                      <span>Variant A ({campaign.abTestPercent}%)</span>
-                      <span>Variant B ({100 - campaign.abTestPercent}%)</span>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '20px 0' }} />
-
-              <h4 style={{ fontSize: '14px', marginBottom: '12px' }}>Throttle Settings</h4>
-
-              <div className="form-group">
-                <label className="form-label">Batch Size</label>
-                <input
-                  type="number"
-                  className="form-input"
-                  value={campaign.batchSize}
-                  onChange={(e) => setCampaign({ ...campaign, batchSize: parseInt(e.target.value) })}
-                />
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">Delay (minutes)</label>
-                <input
-                  type="number"
-                  className="form-input"
-                  value={campaign.delayMinutes}
-                  onChange={(e) => setCampaign({ ...campaign, delayMinutes: parseInt(e.target.value) })}
-                />
-              </div>
-
-              <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '20px 0' }} />
-
-              {/* Personalization Token Picker */}
-              <h4 style={{ fontSize: '14px', marginBottom: '12px' }}>
-                <Sparkles size={14} style={{ marginRight: '4px' }} /> Personalization
-              </h4>
-              <div style={{ position: 'relative' }} ref={tokenPickerRef}>
-                <button
-                  className="btn btn-outline btn-sm"
-                  onClick={() => setShowTokenPicker(!showTokenPicker)}
-                  style={{ width: '100%', justifyContent: 'space-between', display: 'flex' }}
-                >
-                  <span>Insert Token...</span>
-                  <ChevronDown size={14} />
-                </button>
-                {showTokenPicker && (
-                  <div style={{
-                    position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 10,
-                    background: 'var(--bg-secondary)', border: '1px solid var(--border)',
-                    borderRadius: '8px', boxShadow: '0 4px 12px rgba(0,0,0,0.2)', maxHeight: '280px', overflow: 'auto'
-                  }}>
-                    {['Contact', 'Dynamic', 'System'].map(group => (
-                      <div key={group}>
-                        <div style={{ padding: '8px 12px', fontSize: '10px', fontWeight: '600', color: 'var(--text-muted)', textTransform: 'uppercase', background: 'var(--bg-tertiary)' }}>
-                          {group}
-                        </div>
-                        {personalizationTokens.filter(t => t.group === group).map(({ token, label, preview }) => (
-                          <div key={token} style={{ display: 'flex', gap: '8px' }}>
-                            <button
-                              style={{
-                                flex: 1, padding: '8px 12px', background: 'none', border: 'none',
-                                textAlign: 'left', cursor: 'pointer', color: 'var(--text)', fontSize: '13px',
-                                display: 'flex', justifyContent: 'space-between', alignItems: 'center'
-                              }}
-                              onClick={() => insertToken(token)}
-                              onMouseEnter={(e) => e.target.style.background = 'var(--bg-tertiary)'}
-                              onMouseLeave={(e) => e.target.style.background = 'none'}
-                            >
-                              <span>{label}</span>
-                              <code style={{ fontSize: '10px', color: 'var(--text-muted)', background: 'var(--bg-tertiary)', padding: '2px 6px', borderRadius: '4px' }}>
-                                {`{{${token}}}`}
-                              </code>
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* Spam Score Preview */}
-              {spamScore && (
-                <>
-                  <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '20px 0' }} />
-                  <h4 style={{ fontSize: '14px', marginBottom: '12px' }}>
-                    <ShieldCheck size={16} style={{ display: 'inline', marginRight: '6px' }} />
-                    Spam Score
-                  </h4>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
-                    <div className={`score-circle ${getScoreColor()}`} style={{ width: '60px', height: '60px', flexShrink: 0 }}>
-                      <span className="score-value" style={{ fontSize: '20px' }}>{spamScore.score}</span>
-                    </div>
-                    <div>
-                      <div style={{ fontWeight: '600', fontSize: '14px' }}>{spamScore.rating}</div>
-                      <div style={{ height: '6px', width: '120px', background: 'var(--bg-tertiary)', borderRadius: '3px', overflow: 'hidden', marginTop: '4px' }}>
-                        <div style={{ height: '100%', width: `${spamScore.score}%`, background: getScoreBarColor(), transition: 'width 0.5s' }} />
-                      </div>
-                    </div>
-                  </div>
-                  {spamScore.issues && spamScore.issues.length > 0 && (
-                    <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '8px' }}>
-                      {spamScore.issues.slice(0, 3).map((issue, i) => (
-                        <div key={i} style={{ padding: '3px 0', display: 'flex', alignItems: 'flex-start', gap: '4px' }}>
-                          <span style={{ color: '#f59e0b' }}>!</span> {typeof issue === 'string' ? issue : issue.text || 'Issue detected'}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
-
-              {/* AI Generate button — always visible when there's a subject or content */}
-              {(campaign.subject || campaign.content) && (
-                <div style={{ display: 'flex', gap: '6px', marginTop: '12px' }}>
-                  <button className="btn btn-outline btn-sm" onClick={handleAiImproveSubject} disabled={aiLoading} style={{ fontSize: '11px' }}>
-                    <Wand2 size={12} /> {aiLoading ? '...' : 'AI Subjects'}
-                  </button>
-                  <button className="btn btn-outline btn-sm" onClick={() => setShowAiGenerate(!showAiGenerate)} style={{ fontSize: '11px' }}>
-                    <Sparkles size={12} /> Generate
-                  </button>
-                </div>
-              )}
-
-              {/* AI Insights Panel — only shows after analysis runs */}
-              {(campaign.subject || campaign.content) && aiInsights && (
-                <>
-                  <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '20px 0' }} />
-                  <h4 style={{ fontSize: '14px', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <Sparkles size={14} style={{ color: 'var(--accent)' }} /> AI Insights
-                  </h4>
-                  <div style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
-                    gap: '8px',
-                    marginBottom: '12px',
-                    overflow: 'hidden'
-                  }}>
-                    <div style={{ padding: '10px', borderRadius: '10px', background: 'var(--bg-tertiary)', minWidth: 0 }}>
-                      <div style={{ fontSize: '10px', textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: '4px' }}>Recipients</div>
-                      <div style={{ fontSize: '16px', fontWeight: 700 }}>{recipientCount.toLocaleString()}</div>
-                    </div>
-                    <div style={{ padding: '10px', borderRadius: '10px', background: 'var(--bg-tertiary)', minWidth: 0 }}>
-                      <div style={{ fontSize: '10px', textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: '4px' }}>Tone</div>
-                      <div style={{ fontSize: '16px', fontWeight: 700, textTransform: 'capitalize', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{aiBrief.tone}</div>
-                    </div>
-                    <div style={{ padding: '10px', borderRadius: '10px', background: 'var(--bg-tertiary)', minWidth: 0 }}>
-                      <div style={{ fontSize: '10px', textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: '4px' }}>Goal</div>
-                      <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{aiBrief.objective || 'Not set'}</div>
-                    </div>
-                  </div>
-
-                  {aiInsights.subject && (
-                    <div style={{ marginBottom: '10px' }}>
-                      <div style={{ fontSize: '10px', textTransform: 'uppercase', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '4px' }}>Subject</div>
-                      {aiInsights.subject.map((insight, i) => (
-                        <div key={i} style={{ fontSize: '11px', marginBottom: '3px', color: insight.type === 'success' ? 'var(--success)' : insight.type === 'warning' ? 'var(--warning)' : insight.type === 'tip' ? 'var(--accent)' : 'var(--text-secondary)', display: 'flex', gap: '4px' }}>
-                          <span>{insight.type === 'success' ? '✓' : insight.type === 'warning' ? '!' : '→'}</span>
-                          <span>{insight.text}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {aiInsights.content && (
-                    <div style={{ marginBottom: '10px' }}>
-                      <div style={{ fontSize: '10px', textTransform: 'uppercase', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '4px' }}>Content</div>
-                      {aiInsights.content.map((insight, i) => (
-                        <div key={i} style={{ fontSize: '11px', marginBottom: '3px', color: insight.type === 'success' ? 'var(--success)' : insight.type === 'warning' ? 'var(--warning)' : insight.type === 'tip' ? 'var(--accent)' : 'var(--text-secondary)', display: 'flex', gap: '4px' }}>
-                          <span>{insight.type === 'success' ? '✓' : insight.type === 'warning' ? '!' : insight.type === 'info' ? '•' : '→'}</span>
-                          <span>{insight.text}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {aiInsights.sendTime && (
-                    <div style={{ marginBottom: '10px' }}>
-                      <div style={{ fontSize: '10px', textTransform: 'uppercase', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '4px' }}>Send Time</div>
-                      {aiInsights.sendTime.map((tip, i) => (
-                        <div key={i} style={{ fontSize: '11px', marginBottom: '3px', color: 'var(--text-secondary)', display: 'flex', gap: '4px' }}>
-                          <span>⏰</span><span>{tip}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
-                    <button className="btn btn-outline btn-sm" onClick={handleAiImproveSubject} disabled={aiLoading} style={{ fontSize: '11px' }}>
-                      <Wand2 size={12} /> {aiLoading ? '...' : 'AI Subjects'}
-                    </button>
-                  </div>
-
-                  {/* AI Subject Suggestions */}
-                  {aiSubjectSuggestions.length > 0 && (
-                    <div style={{ marginTop: '8px', padding: '8px', background: 'var(--bg-tertiary)', borderRadius: '6px', fontSize: '12px' }}>
-                      <div style={{ fontWeight: 600, marginBottom: '6px', color: 'var(--text)' }}>Suggested Subjects:</div>
-                      {aiSubjectSuggestions.map((s, i) => (
-                        <button
-                          key={i}
-                          type="button"
-                          className="btn btn-outline btn-sm"
-                          onClick={() => { setCampaign(prev => ({ ...prev, subject: s })); addToast('Subject applied', 'success'); }}
-                          style={{ width: '100%', justifyContent: 'space-between', marginBottom: '6px', textAlign: 'left' }}
-                        >
-                          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s}</span>
-                          <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>Apply</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* AI Generate Modal */}
-                  {showAiGenerate && (
-                    <div style={{ marginTop: '8px', padding: '12px', background: 'var(--bg-tertiary)', borderRadius: '10px', border: '1px solid var(--border)' }}>
-                      <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '10px' }}>
-                        Give AI a real brief so it can generate something closer to send-ready copy.
-                      </div>
-                      <textarea
-                        className="form-textarea"
-                        placeholder="Describe the email you want... e.g. Welcome email for new customers with a 20% discount code"
-                        value={aiBrief.prompt}
-                        onChange={e => setAiBrief(prev => ({ ...prev, prompt: e.target.value }))}
-                        rows={3}
-                        style={{ fontSize: '12px', marginBottom: '8px' }}
-                      />
-                      <div className="form-row">
-                        <div className="form-group">
-                          <label className="form-label">Tone</label>
-                          <select className="form-select" value={aiBrief.tone} onChange={e => setAiBrief(prev => ({ ...prev, tone: e.target.value }))}>
-                            <option value="professional">Professional</option>
-                            <option value="friendly">Friendly</option>
-                            <option value="urgent">Urgent</option>
-                            <option value="confident">Confident</option>
-                            <option value="warm">Warm</option>
-                          </select>
-                        </div>
-                        <div className="form-group">
-                          <label className="form-label">Audience</label>
-                          <input className="form-input" value={aiBrief.audience} onChange={e => setAiBrief(prev => ({ ...prev, audience: e.target.value }))} placeholder="New leads, customers, subscribers..." />
-                        </div>
-                      </div>
-                      <div className="form-group">
-                        <label className="form-label">Objective</label>
-                        <input className="form-input" value={aiBrief.objective} onChange={e => setAiBrief(prev => ({ ...prev, objective: e.target.value }))} placeholder="Drive signups, announce a launch, recover carts..." />
-                      </div>
-                      <div className="form-row">
-                        <div className="form-group">
-                          <label className="form-label">Offer / Hook</label>
-                          <input className="form-input" value={aiBrief.offer} onChange={e => setAiBrief(prev => ({ ...prev, offer: e.target.value }))} placeholder="20% off, early access, free audit..." />
-                        </div>
-                        <div className="form-group">
-                          <label className="form-label">Primary CTA</label>
-                          <input className="form-input" value={aiBrief.cta} onChange={e => setAiBrief(prev => ({ ...prev, cta: e.target.value }))} placeholder="Book demo, claim discount, reply now..." />
-                        </div>
-                      </div>
-                      <div className="form-group">
-                        <label className="form-label">Brand Voice</label>
-                        <input className="form-input" value={aiBrief.brandVoice} onChange={e => setAiBrief(prev => ({ ...prev, brandVoice: e.target.value }))} placeholder="Clear, premium, playful, straight-talking..." />
-                      </div>
-                      <label className="flex items-center gap-2 text-sm" style={{ marginBottom: '10px', color: 'var(--text-secondary)' }}>
-                        <input type="checkbox" checked={aiBrief.includePersonalization} onChange={e => setAiBrief(prev => ({ ...prev, includePersonalization: e.target.checked }))} />
-                        Include personalization placeholders when they fit the message
-                      </label>
-                      <div style={{ display: 'flex', gap: '8px' }}>
-                        <button className="btn btn-primary btn-sm" onClick={handleAiGenerate} disabled={aiLoading} style={{ flex: 1 }}>
-                          {aiLoading ? 'Generating...' : 'Generate Email'}
-                        </button>
-                        <button
-                          className="btn btn-outline btn-sm"
-                          type="button"
-                          onClick={handleOpenInBuilder}
-                          style={{ flex: 1 }}
-                        >
-                          <ExternalLink size={12} /> Send to Builder
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
-            </>
-          )}
-        </div>
-
-        {/* Right Panel - Editor */}
-        <div className="card" style={{ overflow: 'hidden' }}>
-          <div className="flex justify-between items-center mb-4">
-            <div className="tabs" style={{ marginBottom: 0, borderBottom: 'none', display: 'flex', gap: '4px' }}>
-              <button
-                className={`tab ${viewMode === 'visual' ? 'active' : ''}`}
-                onClick={() => setViewMode('visual')}
-                style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', gap: '6px' }}
-              >
-                <Edit3 size={14} /> Visual
-              </button>
-              <button
-                className={`tab ${viewMode === 'code' ? 'active' : ''}`}
-                onClick={() => setViewMode('code')}
-                style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', gap: '6px' }}
-              >
-                <Code size={14} /> HTML
-              </button>
-              <button
-                className={`tab ${viewMode === 'preview' ? 'active' : ''}`}
-                onClick={() => setViewMode('preview')}
-                style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', gap: '6px' }}
-              >
-                <Eye size={14} /> Preview
-              </button>
-              <button
-                className="tab"
-                onClick={() => setShowFullPreview(true)}
-                style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', gap: '6px' }}
-              >
-                <Monitor size={14} /> Client Preview
-              </button>
-            </div>
-            {isABTest && (
-              <span className="badge badge-info" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                <Beaker size={12} /> A/B Test Mode
-              </span>
-            )}
-          </div>
-
-          {/* Subject Line(s) */}
-          <div className="form-group">
-            <label className="form-label">Subject Line {isABTest ? '(Variant A)' : ''} *</label>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <input
-                type="text"
-                className="form-input"
-                placeholder="Enter email subject..."
-                value={campaign.subject}
-                onChange={(e) => setCampaign({ ...campaign, subject: e.target.value })}
-                onFocus={() => setActiveSubjectField('A')}
-                style={{ flex: 1 }}
-              />
-              <button
-                className="btn btn-outline btn-sm"
-                onClick={() => {
-                  setActiveSubjectField('A');
-                  setShowTokenPicker(true);
-                }}
-                title="Insert personalization token"
-              >
-                <Wand2 size={14} />
-              </button>
-            </div>
-          </div>
-
-          {/* A/B Test Variant B Subject */}
-          {isABTest && (
-            <div className="form-group" style={{ background: 'rgba(139, 92, 246, 0.05)', padding: '12px', borderRadius: '8px', border: '1px dashed rgba(139, 92, 246, 0.3)' }}>
-              <label className="form-label" style={{ color: '#a855f7' }}>Subject Line (Variant B) *</label>
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="Enter variant B subject..."
-                  value={campaign.subjectB}
-                  onChange={(e) => setCampaign({ ...campaign, subjectB: e.target.value })}
-                  onFocus={() => setActiveSubjectField('B')}
-                  style={{ flex: 1 }}
-                />
-                <button
-                  className="btn btn-outline btn-sm"
-                  onClick={() => {
-                    setActiveSubjectField('B');
-                    setShowTokenPicker(true);
-                  }}
-                  title="Insert personalization token"
-                >
-                  <Wand2 size={14} />
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Content Editor - Variant A */}
-          {viewMode === 'visual' && (
-            <div className="form-group">
-              <label className="form-label">Email Content {isABTest ? '(Variant A)' : ''}</label>
-              <EmailEditor
-                value={campaign.content}
-                onChange={(html) => setCampaign({ ...campaign, content: html })}
-                placeholder="Start typing your email content..."
-              />
-            </div>
-          )}
-
-          {viewMode === 'code' && (
-            <div className="form-group">
-              <label className="form-label">HTML Source Code {isABTest ? '(Variant A)' : ''}</label>
-              <textarea
-                className="form-textarea"
-                style={{
-                  minHeight: '400px', fontFamily: 'monospace',
-                  fontSize: '13px', lineHeight: '1.6'
-                }}
-                value={campaign.content}
-                onChange={(e) => setCampaign({ ...campaign, content: e.target.value })}
-                placeholder="<html>&#10;<body>&#10;  <h1>Hello {{firstName}}!</h1>&#10;</body>&#10;</html>"
-              />
-            </div>
-          )}
-
-          {viewMode === 'preview' && (
-            <div className="form-group">
-              <label className="form-label">Email Preview {isABTest ? '(Variant A)' : ''}</label>
-              {/* iframe + srcDoc correctly renders full HTML documents including
-                  <style> blocks in <head>. dangerouslySetInnerHTML strips them,
-                  causing styles not to apply and the content to overflow. */}
-              <iframe
-                key={campaign.subject + campaign.content.length}
-                srcDoc={buildEmailPreviewDocument({
-                  subject: campaign.subject || '(No Subject)',
-                  content: campaign.content
-                    .replace(/\{\{firstName\}\}/gi, 'John')
-                    .replace(/\{\{lastName\}\}/gi, 'Doe')
-                    .replace(/\{\{fullName\}\}/gi, 'John Doe')
-                    .replace(/\{\{email\}\}/gi, 'john@example.com')
-                    .replace(/\{\{company\}\}/gi, 'Acme Inc')
-                    .replace(/\{\{phone\}\}/gi, '+1234567890')
-                    .replace(/\{\{date\}\}/gi, new Date().toLocaleDateString())
-                    .replace(/\{\{year\}\}/gi, new Date().getFullYear().toString()),
-                  clientLabel: 'Preview',
-                  clientStyle: { fontFamily: 'Arial, sans-serif', background: '#f5f5f5', accent: '#1a73e8' }
-                })}
-                onLoad={handlePreviewIframeLoad}
-                style={{
-                  width: '100%',
-                  minHeight: '300px',
-                  height: '300px',
-                  border: '1px solid var(--border)',
-                  borderRadius: '8px',
-                  display: 'block',
-                  transition: 'height 0.2s',
-                }}
-                sandbox="allow-same-origin"
-                title="Email Preview"
-              />
-            </div>
-          )}
-
-          {/* A/B Test Variant B Content */}
-          {isABTest && (
-            <>
-              <hr style={{ border: 'none', borderTop: '2px dashed rgba(139, 92, 246, 0.3)', margin: '24px 0' }} />
-              <div style={{ background: 'rgba(139, 92, 246, 0.05)', padding: '16px', borderRadius: '8px', border: '1px dashed rgba(139, 92, 246, 0.3)' }}>
-                <h4 style={{ color: '#a855f7', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <Layers size={16} /> Variant B Content
-                </h4>
-
-                {viewMode === 'visual' && (
-                  <div className="form-group">
-                    <EmailEditor
-                      value={campaign.contentB || campaign.content}
-                      onChange={(html) => setCampaign({ ...campaign, contentB: html })}
-                      placeholder="Variant B content (leave empty to use same content with different subject)"
-                    />
-                  </div>
-                )}
-
-                {viewMode === 'code' && (
-                  <div className="form-group">
-                    <textarea
-                      className="form-textarea"
-                      style={{ minHeight: '250px', fontFamily: 'monospace', fontSize: '13px' }}
-                      value={campaign.contentB || ''}
-                      onChange={(e) => setCampaign({ ...campaign, contentB: e.target.value })}
-                      placeholder="Leave empty to use same content as Variant A with different subject"
-                    />
-                  </div>
-                )}
-
-                {viewMode === 'preview' && (
-                  <iframe
-                    key={'b-' + (campaign.subjectB + (campaign.contentB || campaign.content).length)}
-                    srcDoc={buildEmailPreviewDocument({
-                      subject: campaign.subjectB || '(No Subject — Variant B)',
-                      content: (campaign.contentB || campaign.content)
-                        .replace(/\{\{firstName\}\}/gi, 'John')
-                        .replace(/\{\{lastName\}\}/gi, 'Doe')
-                        .replace(/\{\{fullName\}\}/gi, 'John Doe')
-                        .replace(/\{\{email\}\}/gi, 'john@example.com')
-                        .replace(/\{\{company\}\}/gi, 'Acme Inc'),
-                      clientLabel: 'Variant B Preview',
-                      clientStyle: { fontFamily: 'Arial, sans-serif', background: '#f5f0ff', accent: '#a855f7' }
-                    })}
-                    onLoad={handlePreviewIframeLoad}
-                    style={{
-                      width: '100%',
-                      minHeight: '250px',
-                      height: '300px',
-                      border: '1px dashed rgba(139,92,246,0.4)',
-                      borderRadius: '8px',
-                      display: 'block',
-                    }}
-                    sandbox="allow-same-origin"
-                    title="Variant B Preview"
-                  />
-                )}
-
-                <div className="text-sm text-muted mt-2">
-                  Leave variant B content empty to test only different subject lines with the same email body.
-                </div>
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-
-      {showFullPreview && (
-        <EmailPreview
-          subject={campaign.subject}
-          content={campaign.content}
-          fromName={campaign.fromName || ''}
-          fromEmail={campaign.fromEmail || ''}
-          onClose={() => setShowFullPreview(false)}
+      <div className="composer-grid bulky-composer-shell" style={{ gridTemplateColumns: settingsCollapsed ? '52px 1fr' : '340px 1fr' }}>
+        <ComposerSettingsPanel
+          settingsCollapsed={settingsCollapsed}
+          setSettingsCollapsed={setSettingsCollapsed}
+          campaign={campaign}
+          setCampaign={setCampaign}
+          recipientMode={recipientMode}
+          setRecipientMode={setRecipientMode}
+          individualSearch={individualSearch}
+          setIndividualSearch={setIndividualSearch}
+          selectedManualEmails={selectedManualEmails}
+          filteredIndividualContacts={filteredIndividualContacts}
+          toggleIndividualRecipient={toggleIndividualRecipient}
+          removeIndividualRecipient={removeIndividualRecipient}
+          manualEmails={manualEmails}
+          setManualEmails={setManualEmails}
+          lists={lists}
+          tags={tags}
+          toggleTag={toggleTag}
+          recipientCount={recipientCount}
+          recipientBreakdown={recipientBreakdown}
+          contentReadiness={contentReadiness}
+          templateCategories={templateCategories}
+          selectedTemplateId={selectedTemplateId}
+          handleLoadTemplate={handleLoadTemplate}
+          templates={templates}
+          isABTest={isABTest}
+          setIsABTest={setIsABTest}
+          showTokenPicker={showTokenPicker}
+          setShowTokenPicker={setShowTokenPicker}
+          tokenPickerRef={tokenPickerRef}
+          personalizationTokens={personalizationTokens}
+          insertToken={insertToken}
+          spamScore={spamScore}
+          getScoreColor={getScoreColor}
+          getScoreBarColor={getScoreBarColor}
+          aiLoading={aiLoading}
+          handleAiImproveSubject={handleAiImproveSubject}
+          showAiGenerate={showAiGenerate}
+          setShowAiGenerate={setShowAiGenerate}
+          aiInsights={aiInsights}
+          aiBrief={aiBrief}
+          setAiBrief={setAiBrief}
+          handleAiGenerate={handleAiGenerate}
+          handleOpenInBuilder={handleOpenInBuilder}
+          aiSubjectSuggestions={aiSubjectSuggestions}
+          applySuggestedSubject={applySuggestedSubject}
+          campaignSubjectOrContentExists={Boolean(campaign.subject || campaign.content)}
         />
-      )}
+
+        <ComposerEditorPanel
+          viewMode={viewMode}
+          setViewMode={setViewMode}
+          isABTest={isABTest}
+          campaign={campaign}
+          setCampaign={setCampaign}
+          setActiveSubjectField={setActiveSubjectField}
+          setShowTokenPicker={setShowTokenPicker}
+          handlePreviewIframeLoad={handlePreviewIframeLoad}
+        />
+      </div>
     </div>
   );
 }

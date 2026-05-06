@@ -1,5 +1,6 @@
 const {
   validateBulkContactsInput,
+  validateContactImportPreviewPayload,
   validateContactIdList,
   validateContactInput,
   validateContactQueryParams,
@@ -9,6 +10,7 @@ const {
 } = require('./validators');
 
 const SUPPORTED_CONTACT_EXTENSIONS = ['.csv', '.xlsx', '.xls', '.json', '.txt'];
+const CONTACT_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 const CONTACT_IMPORT_FILTERS = [
   { name: 'Supported Files', extensions: ['csv', 'xlsx', 'xls', 'json', 'txt'] },
   { name: 'CSV Files', extensions: ['csv'] },
@@ -220,13 +222,171 @@ async function validateBinaryMime(filePath, ext) {
   return null;
 }
 
+function normalizeImportCellValue(value) {
+  if (value === undefined || value === null) return '';
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value).trim();
+  return '';
+}
+
+function buildContactsFromMapping(rows, mapping) {
+  const fieldsByHeader = Object.entries(mapping || {}).filter(([, field]) => field && field !== 'skip');
+  const emailEntry = fieldsByHeader.find(([, field]) => field === 'email');
+
+  if (!emailEntry) {
+    return { success: false, error: 'Import mapping must include an email column' };
+  }
+
+  const contacts = [];
+  let blankEmailRows = 0;
+
+  for (const row of rows) {
+    const email = normalizeImportCellValue(row?.[emailEntry[0]]).toLowerCase();
+    if (!email) {
+      blankEmailRows++;
+      continue;
+    }
+
+    const contact = {
+      email,
+      firstName: '',
+      lastName: '',
+      company: '',
+      phone: ''
+    };
+
+    for (const [header, field] of fieldsByHeader) {
+      if (field === 'email') continue;
+      const value = normalizeImportCellValue(row?.[header]);
+      if (!value) continue;
+      contact[field] = value;
+    }
+
+    contacts.push(contact);
+  }
+
+  return { success: true, contacts, blankEmailRows };
+}
+
+function getListRecord(db, listId) {
+  if (!listId) return null;
+  if (typeof db._get === 'function') {
+    return db._get('SELECT id, name FROM lists WHERE id = ?', [listId]);
+  }
+  const lists = typeof db.getAllLists === 'function' ? db.getAllLists() : [];
+  return Array.isArray(lists) ? lists.find((list) => list.id === listId) || null : null;
+}
+
+function getTagRecord(db, tagId) {
+  if (!tagId) return null;
+  if (typeof db._get === 'function') {
+    return db._get('SELECT id, name FROM tags WHERE id = ?', [tagId]);
+  }
+  const tags = typeof db.getAllTags === 'function' ? db.getAllTags() : [];
+  return Array.isArray(tags) ? tags.find((tag) => tag.id === tagId) || null : null;
+}
+
+function getExistingEmailSet(db, emails) {
+  const normalizedEmails = [...new Set(
+    (emails || [])
+      .map((email) => String(email || '').trim().toLowerCase())
+      .filter(Boolean)
+  )];
+
+  if (normalizedEmails.length === 0) return new Set();
+
+  if (typeof db._all === 'function') {
+    const existing = new Set();
+    const chunkSize = 400;
+    for (let index = 0; index < normalizedEmails.length; index += chunkSize) {
+      const batch = normalizedEmails.slice(index, index + chunkSize);
+      const placeholders = batch.map(() => '?').join(',');
+      const rows = db._all(
+        `SELECT lower(email) as email FROM contacts WHERE lower(email) IN (${placeholders})`,
+        batch
+      );
+      for (const row of rows || []) {
+        if (row?.email) existing.add(String(row.email).toLowerCase());
+      }
+    }
+    return existing;
+  }
+
+  const contacts = typeof db.getAllContacts === 'function' ? db.getAllContacts() : [];
+  return new Set(
+    (contacts || [])
+      .map((contact) => String(contact?.email || '').trim().toLowerCase())
+      .filter((email) => normalizedEmails.includes(email))
+  );
+}
+
+function prepareContactImport(db, { rows, mapping, listId }) {
+  const mapped = buildContactsFromMapping(rows, mapping);
+  if (!mapped.success) {
+    return { success: false, error: mapped.error };
+  }
+
+  const existingEmails = getExistingEmailSet(db, mapped.contacts.map((contact) => contact.email));
+  const readyContacts = [];
+  const sampleContacts = [];
+  const seenInFile = new Set();
+
+  let invalidEmails = 0;
+  let duplicateInFile = 0;
+  let existingDuplicates = 0;
+
+  for (const contact of mapped.contacts) {
+    const email = String(contact.email || '').trim().toLowerCase();
+    if (!CONTACT_EMAIL_REGEX.test(email)) {
+      invalidEmails++;
+      continue;
+    }
+    if (seenInFile.has(email)) {
+      duplicateInFile++;
+      continue;
+    }
+    seenInFile.add(email);
+    if (existingEmails.has(email)) {
+      existingDuplicates++;
+      continue;
+    }
+
+    readyContacts.push(contact);
+    if (sampleContacts.length < 100) {
+      sampleContacts.push(contact);
+    }
+  }
+
+  const list = listId ? getListRecord(db, listId) : null;
+
+  return {
+    success: true,
+    contacts: readyContacts,
+    sampleContacts,
+    summary: {
+      totalRows: rows.length,
+      mappedRows: mapped.contacts.length,
+      blankEmailRows: mapped.blankEmailRows,
+      invalidEmails,
+      duplicateInFile,
+      existingDuplicates,
+      readyToImport: readyContacts.length,
+      skippedRows: rows.length - readyContacts.length,
+      listId: list?.id || '',
+      listName: list?.name || ''
+    }
+  };
+}
+
 function registerContactsHandlers({
   safeHandler,
   db,
   dialog,
   fs,
   path,
-  getMainWindow
+  getMainWindow,
+  automationEngine,
+  dripEngine
 }) {
   safeHandler('contacts:getAll', () => db.getAllContacts());
   safeHandler('contacts:getFiltered', (e, filter) => {
@@ -240,17 +400,48 @@ function registerContactsHandlers({
     return db.getContactsPage(validated.value);
   });
   safeHandler('contacts:getStats', () => db.getContactStats());
-  safeHandler('contacts:add', (e, contact) => {
+  safeHandler('contacts:getDetail', (e, id) => {
+    const validated = validateId(id, 'id');
+    if (validated.error) return { error: validated.error };
+    return db.getContactDetail(validated.value);
+  });
+  safeHandler('contacts:add', async (e, contact) => {
     const validated = validateContactInput(contact);
     if (validated.error) return { success: false, error: validated.error };
     const result = db.addContact(validated.value);
     if (result && result.error) return result;
+    const ctx = { contactId: result, email: validated.value.email, listId: validated.value.listId || '' };
+    automationEngine?.fire?.('contact_added', ctx).catch(() => {});
+    dripEngine?.enqueueContact?.(result, validated.value.email, { listId: validated.value.listId || '' });
     return { success: true, id: result };
   });
-  safeHandler('contacts:addBulk', (e, contacts) => {
+  safeHandler('contacts:addBulk', async (e, contacts) => {
     const validated = validateBulkContactsInput(contacts);
     if (validated.error) return { error: validated.error };
-    return db.addBulkContacts(validated.value);
+    const insertedBefore = new Date().toISOString();
+    const result = db.addBulkContacts(validated.value);
+
+    if (result.added > 0 && (automationEngine || dripEngine)) {
+      const emails = validated.value.map((c) => String(c.email || '').trim().toLowerCase()).filter(Boolean);
+      const chunkSize = 400;
+      for (let i = 0; i < emails.length; i += chunkSize) {
+        const batch = emails.slice(i, i + chunkSize);
+        const placeholders = batch.map(() => '?').join(',');
+        const rows = typeof db._all === 'function'
+          ? (db._all(
+              `SELECT id, email, listId FROM contacts WHERE lower(email) IN (${placeholders}) AND createdAt >= ?`,
+              [...batch, insertedBefore]
+            ) || [])
+          : [];
+        for (const row of rows) {
+          const ctx = { contactId: row.id, email: row.email, listId: row.listId || '' };
+          automationEngine?.fire?.('contact_added', ctx).catch(() => {});
+          dripEngine?.enqueueContact?.(row.id, row.email, { listId: row.listId || '' });
+        }
+      }
+    }
+
+    return result;
   });
   safeHandler('contacts:update', (e, contact) => {
     const validated = validateContactInput(contact, { requireId: true });
@@ -290,20 +481,43 @@ function registerContactsHandlers({
     const validatedTagId = validateId(tagId, 'tagId');
     if (validatedTagId.error) return { success: false, error: validatedTagId.error };
 
+    const tag = getTagRecord(db, validatedTagId.value);
+    if (!tag) return { success: false, error: 'Tag not found' };
+
     let updated = 0;
+    let skipped = 0;
+    const taggedContactIds = [];
     for (const id of validatedIds.value) {
       try {
-        const contact = db._get('SELECT * FROM contacts WHERE id = ?', [id]);
-        if (!contact) continue;
-        const tags = JSON.parse(contact.tags || '[]');
-        if (!tags.includes(validatedTagId.value)) {
-          tags.push(validatedTagId.value);
-          db._run("UPDATE contacts SET tags = ?, updatedAt = datetime('now') WHERE id = ?", [JSON.stringify(tags), id]);
-          updated++;
+        const existingTags = typeof db.getContactTags === 'function' ? db.getContactTags(id) : [];
+        if (!Array.isArray(existingTags)) {
+          skipped++;
+          continue;
         }
-      } catch (error) {}
+        if (!existingTags.includes(validatedTagId.value)) {
+          db.addTagToContact(id, validatedTagId.value);
+          taggedContactIds.push(id);
+          updated++;
+        } else {
+          skipped++;
+        }
+      } catch (error) {
+        skipped++;
+      }
     }
-    return { success: true, updated };
+
+    for (const id of taggedContactIds) {
+      const contact = typeof db._get === 'function'
+        ? db._get('SELECT email FROM contacts WHERE id = ?', [id])
+        : null;
+      automationEngine?.fire?.('tag_applied', {
+        contactId: id,
+        email: contact?.email || '',
+        tagId: validatedTagId.value
+      }).catch(() => {});
+    }
+
+    return { success: true, updated, skipped };
   });
 
   safeHandler('contacts:getRecipientBreakdown', (e, filter) => {
@@ -405,6 +619,160 @@ function registerContactsHandlers({
       type: ext.replace('.', '')
     };
   });
+
+  safeHandler('contacts:prepareImport', (e, payload) => {
+    const validated = validateContactImportPreviewPayload(payload);
+    if (validated.error) return { success: false, error: validated.error };
+    if (validated.value.listId && !getListRecord(db, validated.value.listId)) {
+      return { success: false, error: 'List not found' };
+    }
+    return prepareContactImport(db, validated.value);
+  });
+
+  // =================== CONTACT ENGAGEMENT (Phase 2) ===================
+  safeHandler('contacts:updateEngagement', (e, contactId) => {
+    const validated = validateId(contactId, 'contactId');
+    if (validated.error) return { error: validated.error };
+    const score = db.updateContactEngagement(validated.value);
+    return { success: true, score };
+  });
+
+  safeHandler('contacts:getByEngagement', (e, range) => {
+    const minScore = range?.minScore ?? 0;
+    const maxScore = range?.maxScore ?? 100;
+    return db.getContactsByEngagement(minScore, maxScore);
+  });
+
+  safeHandler('contacts:getTopEngaged', (e, limit) => {
+    return db.getTopEngagedContacts(limit || 50);
+  });
+
+  safeHandler('contacts:getCold', (e, daysInactive) => {
+    return db.getColdContacts(daysInactive || 90);
+  });
+
+  // =================== RE-ENGAGEMENT FLOWS (Phase 2) ===================
+  safeHandler('contacts:createReengagement', (e, payload) => {
+    if (!payload || !payload.name || !payload.campaignId) {
+      return { error: 'Name and campaignId are required' };
+    }
+    const result = db.createReengagementSequence(
+      payload.name,
+      payload.daysInactive || 90,
+      payload.campaignId
+    );
+    return { success: true, ...result };
+  });
+
+  safeHandler('contacts:archiveInactive', (e, daysInactive) => {
+    const result = db.archiveInactiveContacts(daysInactive || 180);
+    return { success: true, ...result };
+  });
+  // =================== LIST ASSIGNMENT ===================
+  safeHandler('contacts:addToListBulk', (e, contactIds, listId) => {
+    const validatedIds = validateContactIdList(contactIds, { field: 'contactIds' });
+    if (validatedIds.error) return { error: validatedIds.error };
+
+    const validatedListId = validateId(listId, 'listId');
+    if (validatedListId.error) return { error: validatedListId.error };
+
+    const list = getListRecord(db, validatedListId.value);
+    if (!list) return { error: 'List not found' };
+
+    let updated = 0;
+    let skipped = 0;
+    for (const contactId of validatedIds.value) {
+      try {
+        const contact = typeof db._get === 'function'
+          ? db._get('SELECT id, listId FROM contacts WHERE id = ?', [contactId])
+          : null;
+        if (!contact) {
+          skipped++;
+          continue;
+        }
+        if (contact.listId === validatedListId.value) {
+          skipped++;
+          continue;
+        }
+        db.addContactToList(contactId, validatedListId.value);
+        updated++;
+      } catch (_) {
+        skipped++;
+      }
+    }
+    try { db.flushSave?.(); } catch(_) {}
+    return { success: true, updated, skipped };
+  });
+
+  safeHandler('contacts:addToList', (e, contactId, listId) => {
+    const validatedContactId = validateId(contactId, 'contactId');
+    if (validatedContactId.error) return { error: validatedContactId.error };
+
+    const validatedListId = validateId(listId, 'listId');
+    if (validatedListId.error) return { error: validatedListId.error };
+    if (!getListRecord(db, validatedListId.value)) return { error: 'List not found' };
+
+    db.addContactToList(validatedContactId.value, validatedListId.value);
+    return { success: true };
+  });
+
+  safeHandler('contacts:removeFromList', (e, contactId, listId) => {
+    const validatedContactId = validateId(contactId, 'contactId');
+    if (validatedContactId.error) return { error: validatedContactId.error };
+
+    const validatedListId = validateId(listId, 'listId');
+    if (validatedListId.error) return { error: validatedListId.error };
+
+    db.removeContactFromList(validatedContactId.value, validatedListId.value);
+    return { success: true };
+  });
+
+  safeHandler('contacts:getLists', (e, contactId) => {
+    const validated = validateId(contactId, 'contactId');
+    if (validated.error) return { error: validated.error };
+    return db.getContactLists(validated.value);
+  });
+
+  // =================== TAG ASSIGNMENT ===================
+  safeHandler('contacts:addTag', (e, contactId, tagName) => {
+    const validatedContactId = validateId(contactId, 'contactId');
+    if (validatedContactId.error) return { error: validatedContactId.error };
+
+    const validatedTagId = validateId(tagName, 'tagId');
+    if (validatedTagId.error) return { error: validatedTagId.error };
+    if (!getTagRecord(db, validatedTagId.value)) return { error: 'Tag not found' };
+
+    db.addTagToContact(validatedContactId.value, validatedTagId.value);
+
+    const contact = typeof db._get === 'function'
+      ? db._get('SELECT email FROM contacts WHERE id = ?', [validatedContactId.value])
+      : null;
+    automationEngine?.fire?.('tag_applied', {
+      contactId: validatedContactId.value,
+      email: contact?.email || '',
+      tagId: validatedTagId.value
+    }).catch(() => {});
+
+    return { success: true };
+  });
+
+  safeHandler('contacts:removeTag', (e, contactId, tagName) => {
+    const validatedContactId = validateId(contactId, 'contactId');
+    if (validatedContactId.error) return { error: validatedContactId.error };
+
+    const validatedTagId = validateId(tagName, 'tagId');
+    if (validatedTagId.error) return { error: validatedTagId.error };
+
+    db.removeTagFromContact(validatedContactId.value, validatedTagId.value);
+    return { success: true };
+  });
+
+  safeHandler('contacts:getTags', (e, contactId) => {
+    const validated = validateId(contactId, 'contactId');
+    if (validated.error) return { error: validated.error };
+    return db.getContactTags(validated.value);
+  });
+
 }
 
 module.exports = registerContactsHandlers;

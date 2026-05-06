@@ -31,7 +31,17 @@ const VALID_CONTACT_SORT_COLUMNS = new Set([
   'createdAt',
   'updatedAt',
   'verificationStatus',
-  'verificationScore'
+  'verificationScore',
+  'engagementScore'
+]);
+const VALID_CONTACT_IMPORT_FIELDS = new Set([
+  'email',
+  'firstName',
+  'lastName',
+  'company',
+  'phone',
+  'status',
+  'skip'
 ]);
 
 function ok(value) {
@@ -871,6 +881,66 @@ function validateImportFilePath(filePath) {
   return ok(validated.value);
 }
 
+function validateContactImportPreviewPayload(input) {
+  if (!isPlainObject(input)) return fail('Invalid import preview payload');
+
+  if (!Array.isArray(input.rows)) {
+    return fail('Invalid import preview rows: expected an array');
+  }
+  if (input.rows.length === 0) {
+    return fail('Invalid import preview rows: expected at least one row');
+  }
+  if (input.rows.length > 100000) {
+    return fail('Invalid import preview rows: too many rows');
+  }
+
+  const mapping = input.mapping;
+  if (!isPlainObject(mapping)) {
+    return fail('Invalid import preview mapping: expected an object');
+  }
+
+  const normalizedMapping = {};
+  const assignedFields = new Set();
+  for (const [header, field] of Object.entries(mapping)) {
+    const normalizedHeader = readString(header, 'mapping header', {
+      required: true,
+      maxLength: 255,
+      allowEmpty: false
+    });
+    if (normalizedHeader.error) return fail(normalizedHeader.error);
+
+    const normalizedField = readString(field, `mapping.${header}`, {
+      required: true,
+      maxLength: 32,
+      allowEmpty: false
+    });
+    if (normalizedField.error) return fail(normalizedField.error);
+    if (!VALID_CONTACT_IMPORT_FIELDS.has(normalizedField.value)) {
+      return fail(`Invalid import mapping field: ${normalizedField.value}`);
+    }
+    if (normalizedField.value !== 'skip') {
+      if (assignedFields.has(normalizedField.value)) {
+        return fail(`Duplicate import mapping for ${normalizedField.value}`);
+      }
+      assignedFields.add(normalizedField.value);
+    }
+    normalizedMapping[normalizedHeader.value] = normalizedField.value;
+  }
+
+  if (!assignedFields.has('email')) {
+    return fail('Import mapping must include an email column');
+  }
+
+  const listId = readId(input.listId, 'listId', { required: false });
+  if (listId.error) return listId;
+
+  return ok({
+    rows: input.rows,
+    mapping: normalizedMapping,
+    listId: listId.value
+  });
+}
+
 function validateSmtpSettings(input, { requireId = false, requireCredentials = true } = {}) {
   if (!isPlainObject(input)) return fail('Invalid SMTP settings: expected an object');
 
@@ -1295,6 +1365,141 @@ function validateDeliverabilitySettings(input) {
   });
 }
 
+function validateCloudConfig(input) {
+  if (!isPlainObject(input)) return fail('Invalid cloud configuration payload');
+
+  const apiBaseUrl = readHostLike(input.apiBaseUrl, 'apiBaseUrl', { required: false });
+  if (apiBaseUrl.error) return apiBaseUrl;
+
+  const trackingBaseUrl = readHostLike(input.trackingBaseUrl, 'trackingBaseUrl', { required: false });
+  if (trackingBaseUrl.error) return trackingBaseUrl;
+
+  const updatesBaseUrl = readHostLike(input.updatesBaseUrl, 'updatesBaseUrl', { required: false });
+  if (updatesBaseUrl.error) return updatesBaseUrl;
+
+  const supabaseUrl = readHostLike(input.supabaseUrl, 'supabaseUrl', { required: false });
+  if (supabaseUrl.error) return supabaseUrl;
+
+  const supabaseAnonKey = readString(input.supabaseAnonKey, 'supabaseAnonKey', { required: false, trim: false, maxLength: 8192 });
+  if (supabaseAnonKey.error) return supabaseAnonKey;
+
+  const paystackPublicKey = readString(input.paystackPublicKey, 'paystackPublicKey', { required: false, trim: false, maxLength: 4096 });
+  if (paystackPublicKey.error) return paystackPublicKey;
+
+  const paystackCheckoutBaseUrl = readHostLike(input.paystackCheckoutBaseUrl, 'paystackCheckoutBaseUrl', { required: false });
+  if (paystackCheckoutBaseUrl.error) return paystackCheckoutBaseUrl;
+
+  return ok({
+    apiBaseUrl: apiBaseUrl.value,
+    trackingBaseUrl: trackingBaseUrl.value,
+    updatesBaseUrl: updatesBaseUrl.value,
+    supabaseUrl: supabaseUrl.value,
+    supabaseAnonKey: supabaseAnonKey.value,
+    clearSupabaseAnonKey: readBoolean(input.clearSupabaseAnonKey, false),
+    paystackPublicKey: paystackPublicKey.value,
+    clearPaystackPublicKey: readBoolean(input.clearPaystackPublicKey, false),
+    paystackCheckoutBaseUrl: paystackCheckoutBaseUrl.value
+  });
+}
+
+function validateBillingCheckoutRequest(input) {
+  if (!isPlainObject(input)) return fail('Invalid checkout request payload');
+
+  const planId = readString(input.planId, 'planId', {
+    required: true,
+    maxLength: 32,
+    allowEmpty: false
+  });
+  if (planId.error) return planId;
+
+  const email = readOptionalEmail(input.email, 'email');
+  if (email.error) return email;
+
+  const workspaceName = readString(input.workspaceName, 'workspaceName', {
+    required: false,
+    maxLength: 120
+  });
+  if (workspaceName.error) return workspaceName;
+
+  const source = readString(input.source, 'source', {
+    required: false,
+    maxLength: 120
+  });
+  if (source.error) return source;
+
+  return ok({
+    planId: planId.value,
+    email: email.value,
+    workspaceName: workspaceName.value,
+    source: source.value || 'desktop-settings'
+  });
+}
+
+function validateDesktopSignIn(input) {
+  if (!isPlainObject(input)) return fail('Invalid desktop sign-in payload');
+
+  const email = readRequiredEmail(input.email, 'email');
+  if (email.error) return email;
+
+  const password = readString(input.password, 'password', {
+    required: true,
+    trim: false,
+    allowEmpty: false,
+    maxLength: 4096
+  });
+  if (password.error) return password;
+
+  return ok({
+    email: email.value,
+    password: password.value
+  });
+}
+
+function validateDesktopSignUp(input) {
+  if (!isPlainObject(input)) return fail('Invalid desktop sign-up payload');
+
+  const fullName = readString(input.fullName, 'fullName', {
+    required: true,
+    maxLength: 120,
+    allowEmpty: false
+  });
+  if (fullName.error) return fullName;
+
+  const workspaceName = readString(input.workspaceName, 'workspaceName', {
+    required: false,
+    maxLength: 120
+  });
+  if (workspaceName.error) return workspaceName;
+
+  const email = readRequiredEmail(input.email, 'email');
+  if (email.error) return email;
+
+  const password = readString(input.password, 'password', {
+    required: true,
+    trim: false,
+    allowEmpty: false,
+    maxLength: 4096
+  });
+  if (password.error) return password;
+  if (password.value.length < 8) {
+    return fail('Invalid password: must be at least 8 characters');
+  }
+
+  const planId = readString(input.planId, 'planId', {
+    required: false,
+    maxLength: 32
+  });
+  if (planId.error) return planId;
+
+  return ok({
+    fullName: fullName.value,
+    workspaceName: workspaceName.value,
+    email: email.value,
+    password: password.value,
+    planId: planId.value || 'freemium'
+  });
+}
+
 function validateDomainInput(domain) {
   const normalized = readHostLike(domain, 'domain', { required: true });
   if (normalized.error) return normalized;
@@ -1306,16 +1511,48 @@ function validateAiSettings(input) {
 
   const nextSettings = {};
 
+  // Bug-fix: pass `enabled` through so the AI on/off toggle is actually persisted.
+  if (input.enabled !== undefined) {
+    nextSettings.enabled = readBoolean(input.enabled, true);
+  }
+
   if (input.apiKey !== undefined) {
     const apiKey = readString(input.apiKey, 'apiKey', { required: false, maxLength: 4096 });
     if (apiKey.error) return apiKey;
     nextSettings.apiKey = apiKey.value;
   }
 
+  if (input.clearApiKey !== undefined) {
+    nextSettings.clearApiKey = readBoolean(input.clearApiKey, false);
+  }
+
   if (input.model !== undefined) {
-    const model = readString(input.model, 'model', { required: true, maxLength: 200, allowEmpty: false });
+    // Bug-fix: model is optional -- user may save settings before selecting a model
+    // (e.g. first-time OpenRouter setup, or LM Studio before loading models).
+    // allowEmpty:true + required:false lets an empty string pass through.
+    const model = readString(input.model, 'model', { required: false, maxLength: 200, allowEmpty: true });
     if (model.error) return model;
     nextSettings.model = model.value;
+  }
+
+  // Bug 6 fix: normalize null to undefined so null doesn't bypass the
+  // undefined check and corrupt the persisted settings (provider: null in JSON).
+  if (input.provider !== undefined && input.provider !== null) {
+    const provider = readString(String(input.provider), 'provider', { required: true, maxLength: 50, allowEmpty: false });
+    if (provider.error) return provider;
+    if (!['openrouter', 'lmstudio'].includes(provider.value)) {
+      return fail('Invalid provider: must be "openrouter" or "lmstudio"');
+    }
+    nextSettings.provider = provider.value;
+  }
+
+  if (input.lmstudioBaseUrl !== undefined) {
+    const lmstudioBaseUrl = readString(input.lmstudioBaseUrl, 'lmstudioBaseUrl', {
+      required: false,
+      maxLength: 2048
+    });
+    if (lmstudioBaseUrl.error) return lmstudioBaseUrl;
+    nextSettings.lmstudioBaseUrl = lmstudioBaseUrl.value;
   }
 
   if (Object.keys(nextSettings).length === 0) {
@@ -1324,7 +1561,6 @@ function validateAiSettings(input) {
 
   return ok(nextSettings);
 }
-
 function validateAiImproveSubjectPayload(input) {
   if (!isPlainObject(input)) return fail('Invalid AI request');
 
@@ -1684,10 +1920,15 @@ module.exports = {
   validateCampaign,
   validateCampaignSchedule,
   validateBulkContactsInput,
+  validateContactImportPreviewPayload,
   validateContactIdList,
   validateContactInput,
   validateContactQueryParams,
   validateContactVerificationStatus,
+  validateCloudConfig,
+  validateBillingCheckoutRequest,
+  validateDesktopSignUp,
+  validateDesktopSignIn,
   validateDomainInput,
   validateDeliverabilitySettings,
   validateEmailSendPayload,

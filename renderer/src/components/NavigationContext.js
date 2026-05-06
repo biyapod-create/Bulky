@@ -1,15 +1,29 @@
 import React, { createContext, useContext, useState, useCallback, useRef } from 'react';
 
 const NavigationContext = createContext();
+const ACTIVE_PAGE_STORAGE_KEY = 'bulky_active_page';
+
+function readStoredActivePage() {
+  try {
+    return localStorage.getItem(ACTIVE_PAGE_STORAGE_KEY) || '/';
+  } catch {
+    return '/';
+  }
+}
 
 export function NavigationProvider({ children }) {
-  const [activePage, setActivePage] = useState('/');
+  const [activePage, setActivePage] = useState(readStoredActivePage);
   const [pageParams, setPageParams] = useState({});
   const listenersRef = useRef(new Map());
 
   const navigateTo = useCallback((path, state = {}) => {
     setPageParams(prev => ({ ...prev, [path]: state }));
     setActivePage(path);
+    try {
+      localStorage.setItem(ACTIVE_PAGE_STORAGE_KEY, path);
+    } catch {
+      // ignored
+    }
   }, []);
 
   // Pages can subscribe to "becoming active" events

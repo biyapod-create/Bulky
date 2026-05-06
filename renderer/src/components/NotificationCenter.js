@@ -114,7 +114,7 @@ function NotificationCenter() {
       </button>
 
       {isOpen && (
-        <div className="notification-center-panel">
+        <div className="notification-center-panel notification-center-panel--fixed">
           <div className="notification-center-header">
             <span className="notification-center-title">Notifications</span>
             <div style={{ display: 'flex', gap: '8px' }}>

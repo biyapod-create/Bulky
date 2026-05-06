@@ -1,7 +1,7 @@
 {
   "name": "bulky",
-  "version": "6.0.4",
-  "description": "Bulky Email Sender by AllenRetro - Professional Bulk Email Solution",
+  "version": "6.1.0",
+  "description": "Bulky Email Sender v6.1.0 by AllenRetro - Professional bulk email sender without subscription limitations. Features: Tracking, Tags, Scheduling, Spintax, Multi-SMTP, Warmup, Automations, Drip Sequences, Signup Forms, Inbox Placement, AI Assistant.",
   "main": "main.js",
   "author": "AllenRetro",
   "license": "MIT",
@@ -13,9 +13,21 @@
     "build": "npm run build-react && electron-builder",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
+    "cloud:supabase:reconcile": "node scripts/cloud/apply-supabase-migrations.js",
+    "cloud:cloudflare:deploy": "node scripts/cloud/deploy-cloudflare-worker.js",
+    "cloud:verify": "node scripts/cloud/verify-cloud-backend.js",
+    "lint": "node scripts/lint-codebase.js",
     "test": "jest",
     "smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/smoke.ps1",
     "smoke:packaged": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/smoke-packaged.ps1 -Build"
+  },
+  "jest": {
+    "modulePathIgnorePatterns": [
+      "<rootDir>/extracted_asar/"
+    ],
+    "testPathIgnorePatterns": [
+      "<rootDir>/extracted_asar/"
+    ]
   },
   "build": {
     "appId": "com.allenretro.bulky",
@@ -37,6 +49,8 @@
       "icon": "assets/icon.ico"
     },
     "forceCodeSigning": false,
+    "npmRebuild": false,
+    "nodeGypRebuild": false,
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
@@ -49,11 +63,12 @@
       "createStartMenuShortcut": true,
       "shortcutName": "Bulky Email Sender",
       "license": "assets/license.txt",
-      "artifactName": "Bulky Email Sender Setup.${ext}"
+      "artifactName": "Bulky-Email-Sender-Setup-${version}.${ext}"
     },
     "files": [
       "main.js",
       "preload.js",
+      "main-process/**/*",
       "ipc/**/*",
       "database/**/*",
       "services/**/*",
@@ -69,10 +84,20 @@
         "from": "assets/icon.ico",
         "to": "icon.ico"
       }
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "biyapod-create",
+        "repo": "Bulky",
+        "releaseType": "release"
+      }
     ]
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.105.1",
     "electron-store": "^8.1.0",
+    "electron-updater": "^6.3.9",
     "file-type": "^22.0.1",
     "mammoth": "^1.11.0",
     "nodemailer": "^8.0.5",

@@ -6,7 +6,11 @@
 } = require('./validators');
 
 function persistVerificationResults({ db, logger, results }) {
-  const resultArray = results?.results || [];
+  const resultArray = Array.isArray(results?.results)
+    ? results.results
+    : results?.email
+      ? [results]
+      : [];
   if (resultArray.length === 0) return;
 
   try {
@@ -27,13 +31,36 @@ function persistVerificationResults({ db, logger, results }) {
   }
 }
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 function parseManualEmails(value) {
   return [...new Set(
     String(value || '')
       .split(/[\n,;]/)
       .map((email) => email.trim().toLowerCase())
-      .filter(Boolean)
+      .filter((email) => email && EMAIL_RE.test(email))
   )];
+}
+
+function normalizeVerificationOptions(input) {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    return {
+      smtpCheck: false,
+      timeout: undefined,
+      checkCatchAll: true
+    };
+  }
+
+  const rawTimeout = Number(input.timeout);
+  const timeout = Number.isFinite(rawTimeout)
+    ? Math.min(20000, Math.max(2000, Math.round(rawTimeout)))
+    : undefined;
+
+  return {
+    smtpCheck: !!input.smtpCheck,
+    timeout,
+    checkCatchAll: input.checkCatchAll !== false
+  };
 }
 
 function registerMessagingHandlers({
@@ -49,6 +76,12 @@ function registerMessagingHandlers({
   rateLimitedHandler('email:send', async (e, data) => {
     const validated = validateEmailSendPayload(data);
     if (validated.error) return { error: validated.error };
+
+    // Prevent two campaigns from running simultaneously -- emailService holds
+    // instance-level pause/stop/index state that would conflict.
+    if (emailService.currentCampaignId) {
+      return { error: 'A campaign is already running. Stop or wait for it to finish first.' };
+    }
 
     // Support both renderer payload formats:
     //   Legacy (Campaigns.js): { campaign, contacts, settings }
@@ -154,24 +187,28 @@ function registerMessagingHandlers({
 
   safeHandler('verify:email', async (e, input) => {
     const emailInput = typeof input === 'string' ? input : input?.email;
-    const smtpCheck = typeof input === 'object' && input !== null ? !!input.smtpCheck : false;
+    const verifyOptions = normalizeVerificationOptions(input);
     const validated = validateVerifyEmailInput(emailInput);
     if (validated.error) return { error: validated.error };
 
     // smtpCheck opt-in: false by default (fast DNS-only), true for deep SMTP probe
-    const skipSmtpCheck = !smtpCheck;
-    return verificationService.verifyEmail(validated.value, { skipSmtpCheck });
+    const skipSmtpCheck = !verifyOptions.smtpCheck;
+    const result = await verificationService.verifyEmail(validated.value, {
+      skipSmtpCheck,
+      timeout: verifyOptions.timeout,
+      checkCatchAll: verifyOptions.checkCatchAll
+    });
+    persistVerificationResults({ db, logger, results: result });
+    return result;
   });
 
   rateLimitedHandler('verify:bulk', async (e, input) => {
     const emailInput = Array.isArray(input) ? input : input?.emails;
-    const smtpCheck = typeof input === 'object' && input !== null && !Array.isArray(input)
-      ? !!input.smtpCheck
-      : false;
+    const verifyOptions = normalizeVerificationOptions(input);
     const validated = validateVerifyBulkInput(emailInput);
     if (validated.error) return { error: validated.error };
 
-    const skipSmtpCheck = !smtpCheck;
+    const skipSmtpCheck = !verifyOptions.smtpCheck;
     const results = await verificationService.verifyBulk(
       validated.value,
       (progress) => {
@@ -180,7 +217,11 @@ function registerMessagingHandlers({
           mainWindow.webContents.send('verify:progress', progress);
         }
       },
-      { skipSmtpCheck }
+      {
+        skipSmtpCheck,
+        timeout: verifyOptions.timeout,
+        checkCatchAll: verifyOptions.checkCatchAll
+      }
     );
 
     persistVerificationResults({ db, logger, results });

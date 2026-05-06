@@ -4,6 +4,7 @@ function registerCampaignHandlers({
   safeHandler,
   db,
   validateRequired,
+  entitlementService,
   scheduledCampaignTimers,
   scheduleNextCampaign
 }) {
@@ -44,6 +45,9 @@ function registerCampaignHandlers({
     return db.getCampaignLogs(validated.value);
   });
   safeHandler('campaigns:getAnalytics', (e, campaignId) => {
+    const capabilityError = entitlementService?.requireCapability?.('analytics');
+    if (capabilityError) return capabilityError;
+
     const validated = validateId(campaignId, 'campaignId');
     if (validated.error) return { error: validated.error };
     return db.getCampaignAnalytics(validated.value);

@@ -1,14 +1,62 @@
-const crypto = require('crypto');
+﻿const crypto = require('crypto');
 const url = require('url');
 
 class TrackingService {
   constructor(db) {
     this.db = db;
-    this.trackingBaseUrl = 'http://127.0.0.1:3847';
+    this.trackingBaseUrl = 'http://127.0.0.1:3847'; // Default local tracking server
 
     // HMAC secret for unsubscribe token validation
     // In production, this should be persisted and shared with emailService
     this.hmacSecret = null;
+  }
+
+  normalizeEmail(email) {
+    return String(email || '').trim().toLowerCase();
+  }
+
+  getCampaignLogByTracking(campaignId, trackingId) {
+    if (!this.db || typeof this.db.getCampaignLogByTracking !== 'function') {
+      return null;
+    }
+
+    try {
+      return this.db.getCampaignLogByTracking(campaignId, trackingId) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  hasExistingTrackingEvent(campaignId, recipientId, email, type) {
+    if (!this.db || typeof this.db._get !== 'function') {
+      return false;
+    }
+
+    const normalizedEmail = this.normalizeEmail(email);
+
+    try {
+      if (recipientId) {
+        const existingByContact = this.db._get(
+          'SELECT id FROM tracking_events WHERE campaignId = ? AND contactId = ? AND type = ? LIMIT 1',
+          [campaignId, recipientId, type]
+        );
+        if (existingByContact) {
+          return true;
+        }
+      }
+
+      if (normalizedEmail) {
+        const existingByEmail = this.db._get(
+          'SELECT id FROM tracking_events WHERE campaignId = ? AND lower(email) = ? AND type = ? LIMIT 1',
+          [campaignId, normalizedEmail, type]
+        );
+        return !!existingByEmail;
+      }
+    } catch {
+      return false;
+    }
+
+    return false;
   }
 
   // Set the HMAC secret (should match emailService.hmacSecret)
@@ -87,6 +135,39 @@ class TrackingService {
 
   getTrackingBaseUrl() {
     return this.trackingBaseUrl;
+  }
+
+  isPrivateTrackingBaseUrl(baseUrl = this.trackingBaseUrl) {
+    if (!baseUrl || typeof baseUrl !== 'string') return true;
+
+    try {
+      const parsed = new URL(baseUrl);
+      const hostname = String(parsed.hostname || '').toLowerCase();
+      if (!hostname) return true;
+
+      if (
+        hostname === 'localhost' ||
+        hostname === '::1' ||
+        hostname.endsWith('.local') ||
+        hostname.startsWith('127.') ||
+        hostname.startsWith('10.') ||
+        hostname.startsWith('192.168.')
+      ) {
+        return true;
+      }
+
+      const private172Match = hostname.match(/^172\.(\d+)\./);
+      if (private172Match) {
+        const octet = Number(private172Match[1]);
+        if (octet >= 16 && octet <= 31) {
+          return true;
+        }
+      }
+
+      return false;
+    } catch (error) {
+      return true;
+    }
   }
 
   // Create tracking pixel HTML for open tracking
@@ -286,28 +367,15 @@ class TrackingService {
       }
 
       // Get recipient email from campaign logs
-      let email = '';
-      try {
-        const log = this.db.getCampaignLogByTracking(campaignId, trackingId);
-        email = log?.email || '';
-      } catch (dbError) {
-      }
+      const log = this.getCampaignLogByTracking(campaignId, trackingId);
+      const email = this.normalizeEmail(log?.email || '');
 
       // Parse user agent for device/client info
       const uaInfo = this.parseUserAgent(metadata.userAgent);
       const geoInfo = this.parseGeoHeaders(metadata.headers);
 
       // Check if this is a unique open (first time)
-      let isUnique = false;
-      try {
-        const existingOpen = this.db._get(
-          "SELECT id FROM tracking_events WHERE campaignId = ? AND contactId = ? AND type = 'open' LIMIT 1",
-          [campaignId, recipientId]
-        );
-        isUnique = !existingOpen;
-      } catch (e) {
-        isUnique = true; // Assume unique on error
-      }
+      const isUnique = !this.hasExistingTrackingEvent(campaignId, recipientId, email, 'open');
 
       // Record the event
       try {
@@ -330,14 +398,22 @@ class TrackingService {
       }
 
       // Update campaign log with opened timestamp
-      if (isUnique) {
+      const shouldCountAsHumanOpen = isUnique && !uaInfo.isBot;
+      if (shouldCountAsHumanOpen) {
         try {
           this.db.updateCampaignLogOpened(campaignId, trackingId);
         } catch (e) {
         }
       }
 
-      return { success: true, isUnique, client: uaInfo.client, device: uaInfo.device };
+      return {
+        success: true,
+        isUnique,
+        counted: shouldCountAsHumanOpen,
+        isBot: uaInfo.isBot,
+        client: uaInfo.client,
+        device: uaInfo.device
+      };
     } catch (error) {
       return { success: false, error: error.message };
     }
@@ -351,13 +427,15 @@ class TrackingService {
       }
 
       // Validate and sanitize the redirect URL
-      let safeRedirectUrl = linkUrl;
+      let safeRedirectUrl = String(linkUrl || '').trim();
       try {
-        if (linkUrl) {
-          const parsed = new URL(linkUrl);
+        if (safeRedirectUrl) {
+          const parsed = new URL(safeRedirectUrl);
           // Only allow http and https redirects
           if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
             safeRedirectUrl = '';
+          } else {
+            safeRedirectUrl = parsed.toString();
           }
         }
       } catch {
@@ -365,28 +443,15 @@ class TrackingService {
       }
 
       // Get recipient email from campaign logs
-      let email = '';
-      try {
-        const log = this.db.getCampaignLogByTracking(campaignId, trackingId);
-        email = log?.email || '';
-      } catch (dbError) {
-      }
+      const log = this.getCampaignLogByTracking(campaignId, trackingId);
+      const email = this.normalizeEmail(log?.email || '');
 
       // Parse user agent for device/client info
       const uaInfo = this.parseUserAgent(metadata.userAgent);
       const geoInfo = this.parseGeoHeaders(metadata.headers);
 
       // Check if this is a unique click
-      let isUnique = false;
-      try {
-        const existingClick = this.db._get(
-          "SELECT id FROM tracking_events WHERE campaignId = ? AND contactId = ? AND type = 'click' LIMIT 1",
-          [campaignId, recipientId]
-        );
-        isUnique = !existingClick;
-      } catch (e) {
-        isUnique = true;
-      }
+      const isUnique = !this.hasExistingTrackingEvent(campaignId, recipientId, email, 'click');
 
       // Record the event
       try {
@@ -410,14 +475,23 @@ class TrackingService {
       }
 
       // Update campaign log with clicked timestamp
-      if (isUnique) {
+      const shouldCountAsHumanClick = isUnique && !uaInfo.isBot;
+      if (shouldCountAsHumanClick) {
         try {
           this.db.updateCampaignLogClicked(campaignId, trackingId);
         } catch (e) {
         }
       }
 
-      return { success: true, isUnique, redirectUrl: safeRedirectUrl, client: uaInfo.client, device: uaInfo.device };
+      return {
+        success: true,
+        isUnique,
+        counted: shouldCountAsHumanClick,
+        isBot: uaInfo.isBot,
+        redirectUrl: safeRedirectUrl,
+        client: uaInfo.client,
+        device: uaInfo.device
+      };
     } catch (error) {
       return { success: false, error: error.message };
     }
@@ -425,7 +499,8 @@ class TrackingService {
 
   // Handle unsubscribe request with HMAC token validation
   isKnownCampaignRecipient(campaignId, recipientId, email) {
-    if (!this.db || typeof this.db._get !== 'function' || !campaignId || !recipientId || !email) {
+    const normalizedEmail = this.normalizeEmail(email);
+    if (!this.db || typeof this.db._get !== 'function' || !campaignId || !recipientId || !normalizedEmail) {
       return false;
     }
 
@@ -434,7 +509,7 @@ class TrackingService {
         'SELECT email FROM campaign_logs WHERE campaignId = ? AND contactId = ? ORDER BY rowid DESC LIMIT 1',
         [campaignId, recipientId]
       );
-      return !!(log?.email && log.email.toLowerCase() === String(email).toLowerCase());
+      return !!(log?.email && this.normalizeEmail(log.email) === normalizedEmail);
     } catch (e) {
       return false;
     }
@@ -442,26 +517,31 @@ class TrackingService {
 
   async handleUnsubscribe(campaignId, recipientId, email, reason = null, token = null) {
     try {
-      if (!email) {
+      const normalizedEmail = this.normalizeEmail(email);
+      if (!normalizedEmail) {
         return { success: false, error: 'Email address is required' };
+      }
+      const normalizedReason = String(reason || 'User unsubscribed').trim() || 'User unsubscribed';
+      if (!this.db || typeof this.db.addUnsubscribe !== 'function') {
+        return { success: false, error: 'Tracking database is unavailable' };
       }
 
       // Validate signed unsubscribe requests. For backward compatibility, allow
       // older unsigned links only when the recipient matches a sent campaign log.
       if (this.hmacSecret) {
         if (token) {
-          const isValidToken = this.verifyUnsubscribeToken(email, campaignId, token);
+          const isValidToken = this.verifyUnsubscribeToken(normalizedEmail, campaignId, token);
           if (!isValidToken) {
             return { success: false, error: 'Invalid unsubscribe token' };
           }
-        } else if (!this.isKnownCampaignRecipient(campaignId, recipientId, email)) {
+        } else if (!this.isKnownCampaignRecipient(campaignId, recipientId, normalizedEmail)) {
           return { success: false, error: 'Unable to validate unsubscribe request' };
         }
       }
 
       // Add to unsubscribes table
       try {
-        this.db.addUnsubscribe(email, campaignId, reason || 'User unsubscribed');
+        this.db.addUnsubscribe(normalizedEmail, campaignId, normalizedReason);
       } catch (dbError) {
         return { success: false, error: 'Failed to process unsubscribe' };
       }
@@ -469,7 +549,7 @@ class TrackingService {
       // Also add to blacklist to prevent future sends
       try {
         this.db.addToBlacklist({
-          email,
+          email: normalizedEmail,
           reason: 'Unsubscribed',
           source: 'unsubscribe'
         });
@@ -487,7 +567,7 @@ class TrackingService {
   calculateEngagementScore(campaignId, contactId) {
     try {
       const events = this.db.getTrackingEvents(campaignId)
-        .filter(e => e.contactId === contactId);
+        .filter(e => e.contactId === contactId && !e.isBot);
 
       if (events.length === 0) return { score: 0, level: 'none' };
 
@@ -540,7 +620,9 @@ class TrackingService {
 
   // Get tracking statistics for a campaign
   getCampaignTrackingStats(campaignId) {
-    const events = this.db.getTrackingEvents(campaignId);
+    const allEvents = this.db.getTrackingEvents(campaignId);
+    const botEvents = allEvents.filter(e => e.isBot);
+    const events = allEvents.filter(e => !e.isBot);
 
     const opens = events.filter(e => e.type === 'open');
     const clicks = events.filter(e => e.type === 'click');
@@ -593,6 +675,8 @@ class TrackingService {
       uniqueOpens,
       totalClicks: clicks.length,
       uniqueClicks,
+      botOpenEvents: botEvents.filter(e => e.type === 'open').length,
+      botClickEvents: botEvents.filter(e => e.type === 'click').length,
       clicksByLink: Object.entries(clicksByLink)
         .map(([link, count]) => ({ link, count }))
         .sort((a, b) => b.count - a.count),

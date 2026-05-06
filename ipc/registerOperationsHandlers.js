@@ -15,7 +15,8 @@ function registerOperationsHandlers({
   db,
   decryptPassword,
   domainHealthService,
-  getConfiguredDkimSelectors
+  getConfiguredDkimSelectors,
+  entitlementService
 }) {
   safeHandler('stats:getDashboard', () => {
     const stats = db.getDashboardStats();
@@ -117,6 +118,17 @@ function registerOperationsHandlers({
     return { score: db.getDeliverabilityScore(validated.value) };
   });
 
+  safeHandler('stats:getEngagementAnalytics', (e, params) => {
+    const capabilityError = entitlementService?.requireCapability?.('analytics');
+    if (capabilityError) return capabilityError;
+
+    const dateFrom = (params && params.dateFrom) ? String(params.dateFrom).slice(0, 10) : null;
+    const dateTo   = (params && params.dateTo)   ? String(params.dateTo).slice(0, 10)   : null;
+    return db.getEngagementAnalytics(dateFrom, dateTo);
+  });
+
+  safeHandler('stats:getInstallDate', () => db.getInstallDate());
+
   safeHandler('search:global', (e, query) => {
     const validated = validateSearchQuery(query);
     if (validated.error) return { error: validated.error };
@@ -125,7 +137,17 @@ function registerOperationsHandlers({
   });
 
   safeHandler('smtp:testDetailed', async (e, account) => {
-    const validated = validateSmtpSettings(account, { requireCredentials: true });
+    const existingAccount = account?.id
+      ? db.getAllSmtpAccounts().find((entry) => entry.id === account.id)
+      : null;
+    const resolvedAccount = (!(account?.password) && existingAccount?.password)
+      ? {
+        ...account,
+        password: decryptPassword(existingAccount.password)
+      }
+      : account;
+
+    const validated = validateSmtpSettings(resolvedAccount, { requireCredentials: true });
     if (validated.error) return { success: false, error: validated.error, steps: [] };
 
     const nodemailer = require('nodemailer');
@@ -204,6 +226,31 @@ function registerOperationsHandlers({
 
     const id = db.createWarmupSchedule({ smtpAccountId, schedule, isActive: true });
     return { success: true, id, schedule };
+  });
+
+  // =================== DEDICATED IP WARM-UP ADVISOR (Phase 2) ===================
+  safeHandler('warmup:detectColdIP', (e, smtpAccountId) => {
+    const validated = validateId(smtpAccountId, 'smtpAccountId');
+    if (validated.error) return { error: validated.error };
+    return db.detectColdIP(validated.value);
+  });
+
+  safeHandler('warmup:getProgress', (e, smtpAccountId) => {
+    const validated = validateId(smtpAccountId, 'smtpAccountId');
+    if (validated.error) return { error: validated.error };
+    return db.getWarmupProgress(validated.value);
+  });
+
+  safeHandler('warmup:enforceLimit', (e, smtpAccountId) => {
+    const validated = validateId(smtpAccountId, 'smtpAccountId');
+    if (validated.error) return { error: validated.error };
+    return db.enforceWarmupLimit(validated.value);
+  });
+
+  safeHandler('warmup:getReputation', (e, smtpAccountId) => {
+    const validated = validateId(smtpAccountId, 'smtpAccountId');
+    if (validated.error) return { error: validated.error };
+    return db.calculateIPReputation(validated.value);
   });
 }
 

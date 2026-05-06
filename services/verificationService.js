@@ -1033,7 +1033,7 @@ class VerificationService {
 
   // Bulk verification with progress tracking, concurrency, and pause/resume/stop
   async verifyBulk(emails, onProgress, options = {}) {
-    const { skipSmtpCheck = false, checkCatchAll = true, concurrency = null } = options;
+    const { skipSmtpCheck = false, checkCatchAll = true, concurrency = null, timeout = null } = options;
     const effectiveConcurrency = concurrency || this.concurrency;
 
     this._resetState();
@@ -1051,7 +1051,8 @@ class VerificationService {
 
         const result = await this.verifyEmail(email, {
           skipSmtpCheck,
-          checkCatchAll: checkCatchAll && !skipCatchAllCheck
+          checkCatchAll: checkCatchAll && !skipCatchAllCheck,
+          timeout
         });
 
         // Apply cached catch-all if we skipped the check

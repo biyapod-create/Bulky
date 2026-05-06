@@ -172,7 +172,12 @@ function SpamChecker({ isActive }) {
     addToast(`Applied ${count} fix(es). Check spam again to verify.`, 'success');
   };
 
-  const getScoreColor = (score) => score >= 80 ? '#22c55e' : score >= 50 ? '#f59e0b' : '#ef4444';
+  const normalizeScore = (score) => Math.round(score > 1 ? score : score * 100);
+  const getScoreColor = (score) => {
+    const n = normalizeScore(score);
+    return n >= 80 ? '#22c55e' : n >= 50 ? '#f59e0b' : '#ef4444';
+  };
+  const getDisplayScore = (score) => normalizeScore(score);
   const getSeverityStyle = (sev) => ({
     high: { bg: '#fee2e2', border: '#ef4444', text: '#991b1b' },
     medium: { bg: '#fef3c7', border: '#f59e0b', text: '#92400e' },
@@ -432,14 +437,14 @@ function SpamChecker({ isActive }) {
                 background: `${getScoreColor(result.score)}20`
               }}>
                 <span style={{ fontSize: '32px', fontWeight: 'bold', color: getScoreColor(result.score) }}>
-                  {result.score}
+                  {getDisplayScore(result.score)}
                 </span>
                 <span style={{ fontSize: '12px', textTransform: 'uppercase', color: 'var(--text-muted)' }}>
                   {result.rating}
                 </span>
               </div>
               <p style={{ marginTop: '8px', fontSize: '13px', color: getScoreColor(result.score), fontWeight: 500 }}>
-                {result.score >= 80 ? '✓ Ready to send' : result.score >= 50 ? '⚠ Needs work' : '✗ High spam risk'}
+                {normalizeScore(result.score) >= 80 ? '✓ Ready to send' : normalizeScore(result.score) >= 50 ? '⚠ Needs work' : '✗ High spam risk'}
               </p>
             </div>
 

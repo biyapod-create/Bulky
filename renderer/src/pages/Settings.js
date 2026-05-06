@@ -1,15 +1,162 @@
-import React, { useState, useEffect } from 'react';
-import { Save, TestTube, Server, Settings as SettingsIcon, Sun, Moon, Database, Download, Upload, HardDrive, AlertTriangle, Plus, Trash2, Edit3, CheckCircle, XCircle, Shield, TrendingUp, RefreshCw, Globe, Key, Search, Sparkles } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Save, TestTube, Server, Mail, AlertTriangle, Plus, Trash2, Edit3, CheckCircle, XCircle, Shield, TrendingUp, RefreshCw, Globe, Key, Search } from 'lucide-react';
 import Modal from '../components/Modal';
 import { useToast } from '../components/ToastContext';
 import { useTheme } from '../components/ThemeContext';
+import { useEntitlement } from '../components/EntitlementContext';
+import { useNavigation } from '../components/NavigationContext';
 import { getPrimarySmtpAccount as getPrimaryAccount, getSenderDomain, getSenderEmail } from '../utils/smtpAccounts';
 import useLiveDataRefresh from '../hooks/useLiveDataRefresh';
+import { VALID_TABS } from '../features/settings/settingsConfig';
+import SettingsSidebar from '../features/settings/SettingsSidebar';
+import SmtpConfigTab from '../features/settings/SmtpConfigTab';
+import GeneralSettingsTab from '../features/settings/GeneralSettingsTab';
+import CloudServicesTab from '../features/settings/CloudServicesTab';
+import AiSettingsTab from '../features/settings/AiSettingsTab';
+import BackupSettingsTab from '../features/settings/BackupSettingsTab';
+
+const { buildInboxReadinessGuardrails } = require('../utils/deliverability');
+
+const DEFAULT_CLOUD_CONFIG = {
+  apiBaseUrl: '',
+  trackingBaseUrl: '',
+  updatesBaseUrl: '',
+  supabaseUrl: '',
+  supabaseAnonKey: '',
+  hasSupabaseAnonKey: false,
+  clearSupabaseAnonKey: false,
+  paystackPublicKey: '',
+  hasPaystackPublicKey: false,
+  clearPaystackPublicKey: false,
+  paystackCheckoutBaseUrl: ''
+};
+
+const DEFAULT_CLOUD_STATUS = {
+  apiBaseUrl: '',
+  trackingBaseUrl: '',
+  updatesBaseUrl: '',
+  cloudflare: {
+    apiConfigured: false,
+    trackingConfigured: false,
+    updatesConfigured: false
+  },
+  supabase: {
+    configured: false,
+    url: '',
+    hasAnonKey: false
+  },
+  paystack: {
+    configured: false,
+    hasPublicKey: false,
+    checkoutBaseUrl: ''
+  },
+  hybridReady: false
+};
+
+const DEFAULT_ACCOUNT_STATUS = {
+  provider: 'supabase',
+  configured: false,
+  authenticated: false,
+  status: 'needs_configuration',
+  account: {
+    id: '',
+    email: '',
+    fullName: '',
+    avatarUrl: '',
+    workspaceName: '',
+    providers: []
+  },
+  plan: {
+    id: 'legacy',
+    name: 'Local Build',
+    description: 'Current local Bulky build'
+  },
+  mode: 'local',
+  entitlementStatus: 'active',
+  subscription: {
+    provider: '',
+    status: '',
+    reference: '',
+    customerCode: '',
+    currentPeriodEnd: null
+  },
+  devices: {
+    total: 0
+  },
+  lastValidatedAt: null,
+  accessTokenExpiresAt: null,
+  graceEndsAt: null,
+  serviceWindowEndsAt: null,
+  lastError: ''
+};
+
+const DEFAULT_SYNC_STATUS = {
+  available: false,
+  enabled: false,
+  connected: false,
+  state: 'idle',
+  reason: 'not_started',
+  accountId: '',
+  planId: '',
+  watchedTables: [],
+  lastSyncAt: null,
+  lastEventAt: null,
+  lastEventTable: '',
+  lastError: ''
+};
+
+const DEFAULT_DESKTOP_SIGN_IN_FORM = {
+  email: '',
+  password: ''
+};
+
+const DEFAULT_DESKTOP_SIGN_UP_FORM = {
+  fullName: '',
+  workspaceName: '',
+  email: '',
+  password: ''
+};
+
+function mergeAccountStatus(status = {}) {
+  return {
+    ...DEFAULT_ACCOUNT_STATUS,
+    ...status,
+    account: {
+      ...DEFAULT_ACCOUNT_STATUS.account,
+      ...(status.account || {})
+    },
+    plan: {
+      ...DEFAULT_ACCOUNT_STATUS.plan,
+      ...(status.plan || {})
+    },
+    subscription: {
+      ...DEFAULT_ACCOUNT_STATUS.subscription,
+      ...(status.subscription || {})
+    },
+    devices: {
+      ...DEFAULT_ACCOUNT_STATUS.devices,
+      ...(status.devices || {})
+    }
+  };
+}
 
 function Settings({ isActive }) {
   const { addToast } = useToast();
   const { theme, toggleTheme } = useTheme();
-  const [activeTab, setActiveTab] = useState('smtp');
+  const { entitlementState, hasCapability } = useEntitlement();
+  const { pageParams, navigateTo } = useNavigation();
+  const [activeTab, setActiveTab] = useState('general');
+
+  // Deep-link: when navigated to /settings?tab=X or with pageParams, open that tab
+  useEffect(() => {
+    const param = pageParams?.['/settings']?.tab;
+    if (param && VALID_TABS.includes(param)) setActiveTab(param);
+  }, [pageParams]);
+  useEffect(() => {
+    if (activeTab === 'ai' && !hasCapability('aiAssistant')) {
+      setActiveTab('general');
+    }
+  }, [activeTab, hasCapability]);
   const [loading, setLoading] = useState(true);
   const [testing, setTesting] = useState(false);
   const [testingAccountId, setTestingAccountId] = useState(null);
@@ -22,6 +169,22 @@ function Settings({ isActive }) {
   const [autoBackupConfig, setAutoBackupConfig] = useState({ enabled: false, intervalHours: 24 });
   const [backupHistory, setBackupHistory] = useState([]);
   const [isResetting, setIsResetting] = useState(false);
+  const [appVersion, setAppVersion] = useState('');
+  const [systemDiagnostics, setSystemDiagnostics] = useState(null);
+  const [aiDiagnostics, setAiDiagnostics] = useState(null);
+  const [cloudConfig, setCloudConfig] = useState(DEFAULT_CLOUD_CONFIG);
+  const [cloudStatus, setCloudStatus] = useState(DEFAULT_CLOUD_STATUS);
+  const [loadingCloudConfig, setLoadingCloudConfig] = useState(false);
+  const [savingCloudConfig, setSavingCloudConfig] = useState(false);
+  const [accountStatus, setAccountStatus] = useState(DEFAULT_ACCOUNT_STATUS);
+  const [desktopAccountForm, setDesktopAccountForm] = useState(DEFAULT_DESKTOP_SIGN_IN_FORM);
+  const [desktopSignUpForm, setDesktopSignUpForm] = useState(DEFAULT_DESKTOP_SIGN_UP_FORM);
+  const [loadingAccountStatus, setLoadingAccountStatus] = useState(false);
+  const [submittingAccount, setSubmittingAccount] = useState(false);
+  const [syncStatus, setSyncStatus] = useState(DEFAULT_SYNC_STATUS);
+  const [loadingSyncStatus, setLoadingSyncStatus] = useState(false);
+  const [cloudDiagnostics, setCloudDiagnostics] = useState(null);
+  const [testingCloudConnections, setTestingCloudConnections] = useState(false);
 
   // SMTP Accounts (multi-account support)
   const [smtpAccounts, setSmtpAccounts] = useState([]);
@@ -35,6 +198,7 @@ function Settings({ isActive }) {
     secure: false,
     username: '',
     password: '',
+    hasStoredPassword: false,
     fromName: '',
     fromEmail: '',
     replyTo: '',
@@ -49,6 +213,38 @@ function Settings({ isActive }) {
     dkimPrivateKey: ''
   });
 
+  // Seed Accounts (for Inbox Placement testing)
+  const [seedAccounts, setSeedAccounts] = useState([]);
+  const [seedForm, setSeedForm]         = useState({ email: '', provider: 'gmail', isActive: true });
+  const [seedLoading, setSeedLoading]   = useState(false);
+
+  const loadSeedAccounts = async () => {
+    try { const d = await window.electron?.seed?.getAll?.(); setSeedAccounts(Array.isArray(d) ? d : []); } catch {}
+  };
+  const createSeed = async () => {
+    if (!seedForm.email.trim()) { addToast('Email is required', 'error'); return; }
+    setSeedLoading(true);
+    try {
+      const r = await window.electron?.seed?.create?.(seedForm);
+      if (r?.error) throw new Error(r.error);
+      addToast('Seed account added', 'success');
+      setSeedForm({ email: '', provider: 'gmail', isActive: true });
+      loadSeedAccounts();
+    } catch (e) { addToast(e.message || 'Failed', 'error'); }
+    finally { setSeedLoading(false); }
+  };
+  const deleteSeed = async (id) => {
+    if (!window.confirm('Remove this seed account?')) return;
+    try { await window.electron?.seed?.delete?.(id); addToast('Removed', 'success'); loadSeedAccounts(); }
+    catch (e) { addToast('Failed', 'error'); }
+  };
+  const toggleSeed = async (acc) => {
+    try {
+      await window.electron?.seed?.update?.({ ...acc, isActive: !acc.isActive });
+      loadSeedAccounts();
+    } catch {}
+  };
+
   // Legacy single SMTP (kept for backward compat)
   const [smtpSettings, setSmtpSettings] = useState({
     host: '',
@@ -56,6 +252,7 @@ function Settings({ isActive }) {
     secure: false,
     username: '',
     password: '',
+    hasStoredPassword: false,
     fromName: '',
     fromEmail: '',
     replyTo: '',
@@ -79,9 +276,19 @@ function Settings({ isActive }) {
     warmupDays: 14
   });
 
-  // AI Settings
-  const [aiSettings, setAiSettings] = useState({ apiKey: '', model: 'meta-llama/llama-3.1-8b-instruct:free' });
+  // AI Settings - no hardcoded API key or model
+  const [aiSettings, setAiSettings] = useState({
+    enabled: true,
+    apiKey: '',
+    hasApiKey: false,
+    clearApiKey: false,
+    model: '',
+    provider: 'openrouter',
+    lmstudioBaseUrl: 'http://localhost:1234/v1'
+  });
   const [aiTesting, setAiTesting] = useState(false);
+  const [lmStudioModels, setLmStudioModels] = useState([]);
+  const [lmStudioLoading, setLmStudioLoading] = useState(false);
 
   // Deliverability
   const [deliverabilityInfo, setDeliverabilityInfo] = useState({
@@ -92,6 +299,38 @@ function Settings({ isActive }) {
     sendingMode: 'bulk',
     companyAddress: ''
   });
+
+  const normalizeAiSettingsState = useCallback((settings = {}) => ({
+    enabled: settings.enabled !== false && settings.enabled !== 'false',
+    apiKey: '',
+    hasApiKey: !!settings.hasApiKey,
+    clearApiKey: false,
+    model: settings.model || '',
+    provider: settings.provider || 'openrouter',
+    lmstudioBaseUrl: settings.lmstudioBaseUrl || 'http://localhost:1234/v1'
+  }), []);
+
+  const buildAiSettingsPayload = useCallback((settings = {}) => ({
+    enabled: settings.enabled !== false && settings.enabled !== 'false',
+    apiKey: settings.apiKey || '',
+    hasApiKey: !!settings.hasApiKey,
+    clearApiKey: !!settings.clearApiKey,
+    model: settings.model || '',
+    provider: settings.provider || 'openrouter',
+    lmstudioBaseUrl: settings.lmstudioBaseUrl || 'http://localhost:1234/v1'
+  }), []);
+
+  const syncAiSettingsAfterSave = useCallback((settings, result = {}) => {
+    const next = normalizeAiSettingsState({
+      ...settings,
+      hasApiKey: result.hasApiKey !== undefined
+        ? result.hasApiKey
+        : ((!!settings.hasApiKey && !settings.clearApiKey) || !!settings.apiKey)
+    });
+    setAiSettings(next);
+    aiSettingsRef.current = next;
+    return next;
+  }, [normalizeAiSettingsState]);
 
   const getPrimarySenderAccount = () => {
     return getPrimaryAccount(smtpAccounts);
@@ -106,6 +345,15 @@ function Settings({ isActive }) {
     return getSenderDomain({ fromEmail: getEffectiveFromEmail() });
   };
 
+  const formatBytes = (bytes) => {
+    const size = Number(bytes || 0);
+    if (!size) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    const unitIndex = Math.min(Math.floor(Math.log(size) / Math.log(1024)), units.length - 1);
+    const value = size / (1024 ** unitIndex);
+    return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+  };
+
   useEffect(() => {
     loadSettings();
     loadBackupInfo();
@@ -115,6 +363,11 @@ function Settings({ isActive }) {
     loadAutoBackupConfig();
     loadBackupHistory();
     loadAiSettings();
+    loadCloudConfig();
+    loadAccountStatus();
+    loadSyncStatus();
+    loadDiagnostics();
+    loadSeedAccounts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -125,6 +378,10 @@ function Settings({ isActive }) {
       loadSmtpOverview();
       loadDeliverabilityInfo();
       loadBackupHistory();
+      loadCloudConfig();
+      loadAccountStatus();
+      loadSyncStatus();
+      loadDiagnostics();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isActive]);
@@ -142,6 +399,10 @@ function Settings({ isActive }) {
         loadAutoBackupConfig();
         loadBackupHistory();
         loadAiSettings();
+        loadCloudConfig();
+        loadAccountStatus();
+        loadSyncStatus();
+        loadDiagnostics();
       }
     });
     return unsub;
@@ -185,35 +446,572 @@ function Settings({ isActive }) {
     try {
       if (window.electron?.ai?.getSettings) {
         const settings = await window.electron.ai.getSettings();
-        if (settings) setAiSettings(settings);
+        if (settings) {
+          const normalized = normalizeAiSettingsState(settings);
+          setAiSettings(normalized);
+          // Keep ref in sync so loadLmStudioModels reads fresh URL without
+          // needing aiSettings in its dep array.
+          aiSettingsRef.current = normalized;
+        }
+      }
+      // Bug-fix: load the full OpenRouter model list dynamically from the
+      // service instead of using the old hardcoded 7-model state.
+      if (window.electron?.ai?.getModels) {
+        const models = await window.electron.ai.getModels();
+        if (Array.isArray(models) && models.length > 0) {
+          setOpenRouterModels(models);
+        }
       }
     } catch (e) {
       // ignored
     }
   };
 
+  const loadDiagnostics = useCallback(async () => {
+    try {
+      const [version, diagnostics, aiDiag] = await Promise.all([
+        window.electron?.app?.getVersion?.() || Promise.resolve(''),
+        window.electron?.settings?.getDiagnostics?.() || Promise.resolve(null),
+        window.electron?.ai?.getDiagnostics?.() || Promise.resolve(null)
+      ]);
+      if (version) setAppVersion(version);
+      if (diagnostics) {
+        setSystemDiagnostics(diagnostics);
+        if (!version && diagnostics.version) {
+          setAppVersion(diagnostics.version);
+        }
+      }
+      if (aiDiag) setAiDiagnostics(aiDiag);
+    } catch {
+      // ignored
+    }
+  }, []);
+
+  const loadCloudConfig = useCallback(async () => {
+    if (!window.electron?.cloud) {
+      setCloudConfig(DEFAULT_CLOUD_CONFIG);
+      setCloudStatus(DEFAULT_CLOUD_STATUS);
+      return;
+    }
+
+    setLoadingCloudConfig(true);
+    try {
+      const [configResult, statusResult] = await Promise.all([
+        window.electron.cloud.getConfig?.() || Promise.resolve(null),
+        window.electron.cloud.getStatus?.() || Promise.resolve(null)
+      ]);
+
+      if (configResult && !configResult.error) {
+        setCloudConfig({
+          ...DEFAULT_CLOUD_CONFIG,
+          ...configResult
+        });
+      }
+
+      if (statusResult && !statusResult.error) {
+        setCloudStatus({
+          ...DEFAULT_CLOUD_STATUS,
+          ...statusResult,
+          cloudflare: {
+            ...DEFAULT_CLOUD_STATUS.cloudflare,
+            ...(statusResult.cloudflare || {})
+          },
+          supabase: {
+            ...DEFAULT_CLOUD_STATUS.supabase,
+            ...(statusResult.supabase || {})
+          },
+          paystack: {
+            ...DEFAULT_CLOUD_STATUS.paystack,
+            ...(statusResult.paystack || {})
+          }
+        });
+      }
+    } catch {
+      // ignored
+    } finally {
+      setLoadingCloudConfig(false);
+    }
+  }, []);
+
+  const loadAccountStatus = useCallback(async () => {
+    if (!window.electron?.account?.getStatus) {
+      setAccountStatus(DEFAULT_ACCOUNT_STATUS);
+      return;
+    }
+
+    setLoadingAccountStatus(true);
+    try {
+      const nextStatus = await window.electron.account.getStatus();
+      if (nextStatus && !nextStatus.error) {
+        setAccountStatus(mergeAccountStatus(nextStatus));
+      }
+    } catch {
+      // ignored
+    } finally {
+      setLoadingAccountStatus(false);
+    }
+  }, []);
+
+  const loadSyncStatus = useCallback(async () => {
+    if (!window.electron?.cloud?.getSyncStatus) {
+      setSyncStatus(DEFAULT_SYNC_STATUS);
+      return;
+    }
+
+    setLoadingSyncStatus(true);
+    try {
+      const nextStatus = await window.electron.cloud.getSyncStatus();
+      if (nextStatus && !nextStatus.error) {
+        setSyncStatus({
+          ...DEFAULT_SYNC_STATUS,
+          ...nextStatus
+        });
+      }
+    } catch {
+      // ignored
+    } finally {
+      setLoadingSyncStatus(false);
+    }
+  }, []);
+
+  // Bug-fix: was deduplicated via toast-ID state which itself lived in the dep
+  // array of loadLmStudioModels ?????? causing the callback to be recreated on every
+  // error, which re-triggered the auto-load effect, creating an infinite retry
+  // loop whenever LM Studio was unreachable. Replaced with a plain ref flag.
+  const lmStudioErrorShownRef = React.useRef(false);
+
+  // Bug-fix: openRouterModels was a hardcoded 7-model stale list. Now loaded
+  // dynamically from ai:getModels so the dropdown always mirrors aiService.js.
+  const [openRouterModels, setOpenRouterModels] = useState([]);
+
+  // Bug-fix: Removed aiSettings from the useCallback dep array. The function
+  // was reading aiSettings.lmstudioBaseUrl from the closure which caused it to
+  // be recreated on every aiSettings change ?????? and that recreation re-triggered
+  // the auto-load useEffect. Fix: read lmstudioBaseUrl via a ref so the
+  // callback is stable and the effect only fires when provider changes.
+  const aiSettingsRef = React.useRef(null);
+  const loadLmStudioModels = useCallback(async () => {
+    if (!window.electron?.ai?.getLmstudioModels) return;
+    setLmStudioLoading(true);
+    lmStudioErrorShownRef.current = false;
+
+    // Read current URL from ref so this callback does not need aiSettings in
+    // its dep array (which would recreate it on every keystroke).
+    const savedUrl = aiSettingsRef.current?.lmstudioBaseUrl || 'http://localhost:1234/v1';
+    const triedEndpoints = [
+      savedUrl,
+      'http://localhost:1234/v1',
+      'http://127.0.0.1:1234/v1',
+      'http://localhost:1234',
+      'http://127.0.0.1:1234'
+    ].filter((v, i, arr) => arr.indexOf(v) === i); // deduplicate
+
+    let found = false;
+    let lastError = '';
+
+    for (const base of triedEndpoints) {
+      try {
+        const result = await window.electron.ai.getLmstudioModels(base);
+        if (result?.models && Array.isArray(result.models) && result.models.length > 0) {
+          setLmStudioModels(result.models);
+          // Update URL in settings state if we found a working endpoint
+          setAiSettings((prev) => {
+            const next = { ...prev, lmstudioBaseUrl: base };
+            // Auto-select first model only if current model is empty
+            if (!prev.model) next.model = result.models[0].id;
+            return next;
+          });
+          addToast('LM Studio models loaded', 'success');
+          found = true;
+          break;
+        } else if (result?.error) {
+          lastError = result.error;
+        } else {
+          lastError = 'LM Studio reachable but no models loaded -- load a model in LM Studio first';
+        }
+      } catch (e) {
+        lastError = e.message || 'Failed to reach LM Studio';
+      }
+    }
+
+    if (!found) {
+      setLmStudioModels([]);
+      // Bug-fix: do NOT call setAiSettings here. The old code called
+      // setAiSettings({...prev, model:''}) which created a new object reference
+      // every render, which recreated this callback, which re-triggered the
+      // auto-load effect ?????? infinite loop when LM Studio is unreachable.
+      if (!lmStudioErrorShownRef.current) {
+        lmStudioErrorShownRef.current = true;
+        addToast(
+          lastError.includes('ECONNREFUSED') || lastError.includes('connect') || lastError.includes('ENOTFOUND')
+            ? 'LM Studio not detected. Start LM Studio, load a model, then click Load Models.'
+            : (lastError || 'Could not load LM Studio models'),
+          'error',
+          6000
+        );
+      }
+    }
+    setLmStudioLoading(false);
+  // Stable dep array ?????? no aiSettings, no error state.
+  // aiSettingsRef.current is always fresh without being a dep.
+  }, [addToast]);
+
   const handleSaveAiSettings = async () => {
     try {
-      await window.electron?.ai?.saveSettings(aiSettings);
-      addToast('AI settings saved', 'success');
+      // Bug-fix: the IPC layer returns { error } as a resolved value ?????? not a
+      // rejection ?????? so we must check result?.error explicitly. Previously this
+      // handler showed "AI settings saved" even when the validator rejected the
+      // payload (e.g. empty model on first setup).
+      const result = await window.electron?.ai?.saveSettings(buildAiSettingsPayload(aiSettings));
+      if (result?.error) {
+        addToast('Could not save AI settings: ' + result.error, 'error');
+      } else {
+        syncAiSettingsAfterSave(aiSettings, result);
+        addToast('AI settings saved', 'success');
+      }
     } catch (e) {
-      addToast('Failed to save AI settings', 'error');
+      addToast('Failed to save AI settings: ' + (e.message || 'Unknown error'), 'error');
+    }
+  };
+
+  const handleRefreshCloudConfig = useCallback(async () => {
+    await Promise.all([
+      loadCloudConfig(),
+      loadAccountStatus(),
+      loadSyncStatus(),
+      loadDiagnostics()
+    ]);
+  }, [loadAccountStatus, loadCloudConfig, loadDiagnostics, loadSyncStatus]);
+
+  const emitAccountStatusChanged = (status) => {
+    if (!status) {
+      return;
+    }
+    window.dispatchEvent(new CustomEvent('bulky:account-status-changed', { detail: status }));
+  };
+
+  const handleSaveCloudConfig = async () => {
+    if (!window.electron?.cloud?.saveConfig) {
+      addToast('Cloud configuration is not available in this build', 'error');
+      return;
+    }
+
+    setSavingCloudConfig(true);
+    try {
+      const result = await window.electron.cloud.saveConfig(cloudConfig);
+      if (result?.error) {
+        addToast('Failed to save cloud configuration: ' + result.error, 'error');
+        return;
+      }
+
+      if (result?.config) {
+        setCloudConfig({
+          ...DEFAULT_CLOUD_CONFIG,
+          ...result.config
+        });
+      }
+
+      if (result?.status) {
+        setCloudStatus({
+          ...DEFAULT_CLOUD_STATUS,
+          ...result.status,
+          cloudflare: {
+            ...DEFAULT_CLOUD_STATUS.cloudflare,
+            ...(result.status.cloudflare || {})
+          },
+          supabase: {
+            ...DEFAULT_CLOUD_STATUS.supabase,
+            ...(result.status.supabase || {})
+          },
+          paystack: {
+            ...DEFAULT_CLOUD_STATUS.paystack,
+            ...(result.status.paystack || {})
+          }
+        });
+      }
+
+      if (result?.accountStatus && !result.accountStatus.error) {
+        setAccountStatus(mergeAccountStatus(result.accountStatus));
+        emitAccountStatusChanged(result.accountStatus);
+      }
+
+      if (result?.syncStatus && !result.syncStatus.error) {
+        setSyncStatus({
+          ...DEFAULT_SYNC_STATUS,
+          ...result.syncStatus
+        });
+      }
+
+      await loadDiagnostics();
+      await Promise.all([
+        loadAccountStatus(),
+        loadSyncStatus()
+      ]);
+      addToast('Connected service settings saved', 'success');
+    } catch (error) {
+      addToast('Failed to save connected service settings: ' + (error.message || 'Unknown error'), 'error');
+    } finally {
+      setSavingCloudConfig(false);
+    }
+  };
+
+  const handleAccountSignIn = async () => {
+    if (!window.electron?.account?.signIn) {
+      addToast('Desktop account login is not available in this build', 'error');
+      return;
+    }
+
+    setSubmittingAccount(true);
+    try {
+      const result = await window.electron.account.signIn(desktopAccountForm);
+      if (result?.error) {
+        addToast('Desktop sign-in failed: ' + result.error, 'error');
+        return;
+      }
+
+      if (result?.status) {
+        setAccountStatus(mergeAccountStatus(result.status));
+        emitAccountStatusChanged(result.status);
+      }
+
+      setDesktopAccountForm((prev) => ({ ...prev, password: '' }));
+      await Promise.all([
+        loadDiagnostics(),
+        loadSyncStatus()
+      ]);
+      addToast('Desktop account connected', 'success');
+    } catch (error) {
+      addToast('Desktop sign-in failed: ' + (error.message || 'Unknown error'), 'error');
+    } finally {
+      setSubmittingAccount(false);
+    }
+  };
+
+  const handleAccountSignUp = async () => {
+    if (!window.electron?.account?.signUp) {
+      addToast('Desktop account sign-up is not available in this build', 'error');
+      return;
+    }
+
+    setSubmittingAccount(true);
+    try {
+      const result = await window.electron.account.signUp(desktopSignUpForm);
+      if (result?.error) {
+        addToast('Desktop sign-up failed: ' + result.error, 'error');
+        return;
+      }
+
+      if (result?.status) {
+        setAccountStatus(mergeAccountStatus(result.status));
+        emitAccountStatusChanged(result.status);
+      }
+
+      setDesktopAccountForm({
+        email: desktopSignUpForm.email,
+        password: ''
+      });
+      setDesktopSignUpForm((prev) => ({
+        ...prev,
+        password: ''
+      }));
+
+      await Promise.all([
+        loadDiagnostics(),
+        loadSyncStatus()
+      ]);
+      addToast(
+        result?.message || (result?.pendingConfirmation
+          ? 'Desktop account created. Check your email to confirm it before signing in.'
+          : 'Desktop account created and connected.'),
+        'success'
+      );
+    } catch (error) {
+      addToast('Desktop sign-up failed: ' + (error.message || 'Unknown error'), 'error');
+    } finally {
+      setSubmittingAccount(false);
+    }
+  };
+
+  const handleAccountSignOut = async () => {
+    if (!window.electron?.account?.signOut) {
+      addToast('Desktop account sign-out is not available in this build', 'error');
+      return;
+    }
+
+    setSubmittingAccount(true);
+    try {
+      const result = await window.electron.account.signOut();
+      if (result?.error) {
+        addToast('Could not sign out: ' + result.error, 'error');
+        return;
+      }
+
+      if (result?.status) {
+        setAccountStatus(mergeAccountStatus(result.status));
+        emitAccountStatusChanged(result.status);
+      }
+
+      setDesktopAccountForm(DEFAULT_DESKTOP_SIGN_IN_FORM);
+      setDesktopSignUpForm(DEFAULT_DESKTOP_SIGN_UP_FORM);
+      await Promise.all([
+        loadDiagnostics(),
+        loadSyncStatus()
+      ]);
+      addToast('Desktop account signed out', 'success');
+    } catch (error) {
+      addToast('Could not sign out: ' + (error.message || 'Unknown error'), 'error');
+    } finally {
+      setSubmittingAccount(false);
+    }
+  };
+
+  const handleAccountRefresh = async () => {
+    if (!window.electron?.account?.refresh) {
+      addToast('Desktop account refresh is not available in this build', 'error');
+      return;
+    }
+
+    setSubmittingAccount(true);
+    try {
+      const result = await window.electron.account.refresh();
+      if (result?.error) {
+        addToast('Could not refresh the desktop session: ' + result.error, 'error');
+        return;
+      }
+
+      if (result?.status) {
+        setAccountStatus(mergeAccountStatus(result.status));
+        emitAccountStatusChanged(result.status);
+      } else {
+        await loadAccountStatus();
+      }
+
+      await Promise.all([
+        loadDiagnostics(),
+        loadSyncStatus()
+      ]);
+      addToast('Desktop account session refreshed', 'success');
+    } catch (error) {
+      addToast('Could not refresh the desktop session: ' + (error.message || 'Unknown error'), 'error');
+    } finally {
+      setSubmittingAccount(false);
+    }
+  };
+
+  const handleRunCloudDiagnostics = async () => {
+    if (!window.electron?.cloud?.testConnections) {
+      addToast('Connected service diagnostics are not available in this build', 'error');
+      return;
+    }
+
+    setTestingCloudConnections(true);
+    try {
+      const result = await window.electron.cloud.testConnections();
+      if (result?.error) {
+        addToast('Diagnostics failed: ' + result.error, 'error');
+        return;
+      }
+
+      setCloudDiagnostics(result);
+      const supabaseOk = !!result?.supabase?.ok;
+      const trackingOk = !!result?.cloudflare?.tracking?.ok;
+      addToast(
+        supabaseOk && trackingOk
+          ? 'Connected service diagnostics passed'
+          : 'Diagnostics finished with one or more connection issues',
+        supabaseOk && trackingOk ? 'success' : 'warning'
+      );
+    } catch (error) {
+      addToast('Diagnostics failed: ' + (error.message || 'Unknown error'), 'error');
+    } finally {
+      setTestingCloudConnections(false);
+    }
+  };
+
+  const handleSyncNow = async () => {
+    if (!window.electron?.cloud?.syncNow) {
+      addToast('Realtime sync is not available in this build', 'error');
+      return;
+    }
+
+    setLoadingSyncStatus(true);
+    try {
+      const result = await window.electron.cloud.syncNow();
+      if (result?.error) {
+        addToast('Realtime sync failed: ' + result.error, 'error');
+        return;
+      }
+
+      setSyncStatus({
+        ...DEFAULT_SYNC_STATUS,
+        ...result
+      });
+      await Promise.all([
+        loadAccountStatus(),
+        loadDiagnostics()
+      ]);
+      addToast('Realtime sync completed', 'success');
+    } catch (error) {
+      addToast('Realtime sync failed: ' + (error.message || 'Unknown error'), 'error');
+    } finally {
+      setLoadingSyncStatus(false);
+    }
+  };
+
+  const handleOpenCheckout = async (planId) => {
+    if (!window.electron?.cloud?.openCheckout) {
+      addToast('Billing checkout is not available in this build', 'error');
+      return;
+    }
+
+    try {
+      const result = await window.electron.cloud.openCheckout({
+        planId,
+        email: accountStatus?.account?.email || desktopSignUpForm.email || desktopAccountForm.email || '',
+        workspaceName: accountStatus?.account?.workspaceName || desktopSignUpForm.workspaceName || '',
+        source: 'settings-account'
+      });
+
+      if (result?.error) {
+        addToast('Could not open billing checkout: ' + result.error, 'error');
+        return;
+      }
+
+      addToast(`Opened ${planId === 'pro' ? 'Pro' : 'One-off'} checkout`, 'success');
+    } catch (error) {
+      addToast('Could not open billing checkout: ' + (error.message || 'Unknown error'), 'error');
     }
   };
 
   const handleTestAi = async () => {
-    if (!aiSettings.apiKey) {
-      addToast('Please enter an API key first', 'error');
+    if (aiSettings.provider === 'openrouter' && !aiSettings.apiKey && !aiSettings.hasApiKey) {
+      addToast('Please enter an OpenRouter API key first', 'error');
+      return;
+    }
+    if (aiSettings.provider === 'lmstudio' && !aiSettings.lmstudioBaseUrl) {
+      addToast('Please enter the LM Studio server URL first', 'error');
       return;
     }
     setAiTesting(true);
     try {
-      await window.electron?.ai?.saveSettings(aiSettings);
-      const result = await window.electron?.ai?.improveSubject({ subject: 'Test email subject', context: '' });
-      if (result.error) {
-        addToast('AI test failed: ' + result.error, 'error');
+      // BUG 1 FIX: Test FIRST, persist only on success.
+      // Previously saveSettings ran before testConnection so a bad key was
+      // committed to the DB even when the test failed.
+      const result = await window.electron?.ai?.testConnection(buildAiSettingsPayload(aiSettings));
+      if (result?.error) {
+        addToast('Connection failed: ' + result.error, 'error');
       } else {
-        addToast('AI connection successful!', 'success');
+        // Test passed ?????? now safe to persist
+        const saveResult = await window.electron?.ai?.saveSettings(buildAiSettingsPayload(aiSettings));
+        if (saveResult?.error) {
+          addToast('Connected, but could not save settings: ' + saveResult.error, 'error');
+        } else {
+          syncAiSettingsAfterSave(aiSettings, saveResult);
+          addToast(result?.message || 'AI connection successful -- settings saved!', 'success');
+        }
+        if (result?.models && aiSettings.provider === 'lmstudio') {
+          setLmStudioModels(result.models);
+        }
       }
     } catch (e) {
       addToast('AI test failed: ' + (e.message || 'Unknown error'), 'error');
@@ -221,6 +1019,24 @@ function Settings({ isActive }) {
       setAiTesting(false);
     }
   };
+
+  // Keep aiSettingsRef always in sync with the latest aiSettings state so
+  // loadLmStudioModels can read the URL without being in its dep array.
+  useEffect(() => {
+    aiSettingsRef.current = aiSettings;
+  }, [aiSettings]);
+
+  // Auto-load LM Studio models when the user switches to the lmstudio provider.
+  // loadLmStudioModels, lmStudioModels.length, lmStudioLoading are intentionally
+  // omitted from the dep array. loadLmStudioModels is a stable callback ([addToast]
+  // only) ?????? adding it here caused an infinite retry loop when LM Studio was
+  // unreachable (old aiSettings dep recreated the callback on every error).
+  useEffect(() => {
+    if (aiSettings.provider === 'lmstudio' && lmStudioModels.length === 0 && !lmStudioLoading) {
+      loadLmStudioModels();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiSettings.provider]);
 
   const loadSettings = async () => {
     try {
@@ -287,7 +1103,10 @@ function Settings({ isActive }) {
       loadDeliverabilityInfo(),
       loadAutoBackupConfig(),
       loadBackupHistory(),
-      loadAiSettings()
+      loadAiSettings(),
+      loadCloudConfig(),
+      loadAccountStatus(),
+      loadDiagnostics()
     ]);
   };
 
@@ -301,7 +1120,11 @@ function Settings({ isActive }) {
 
   const handleSaveSmtp = async () => {
     try {
-      await window.electron.smtp.save(smtpSettings);
+      const result = await window.electron.smtp.save(smtpSettings);
+      if (result?.error) {
+        addToast('Failed to save settings: ' + result.error, 'error');
+        return;
+      }
       loadSmtpOverview();
       addToast('SMTP settings saved', 'success');
     } catch (error) {
@@ -316,7 +1139,7 @@ function Settings({ isActive }) {
       if (result.success) {
         addToast('Connection successful!', 'success');
       } else {
-        addToast(`Connection failed: ${result.message}`, 'error');
+        addToast(`Connection failed: ${result.error || result.message || 'Unknown error'}`, 'error');
       }
     } catch (error) {
       addToast('Connection test failed', 'error');
@@ -359,13 +1182,17 @@ function Settings({ isActive }) {
       return;
     }
     try {
+      let result;
       if (editingAccount) {
-        await window.electron.smtpAccounts.update({ ...accountForm, id: editingAccount.id });
-        addToast('Account updated', 'success');
+        result = await window.electron.smtpAccounts.update({ ...accountForm, id: editingAccount.id });
       } else {
-        await window.electron.smtpAccounts.add(accountForm);
-        addToast('Account added', 'success');
+        result = await window.electron.smtpAccounts.add(accountForm);
       }
+      if (result?.error) {
+        addToast(result.error, 'error');
+        return;
+      }
+      addToast(editingAccount ? 'Account updated' : 'Account added', 'success');
       setShowAccountModal(false);
       setEditingAccount(null);
       resetAccountForm();
@@ -396,7 +1223,8 @@ function Settings({ isActive }) {
       port: account.port || 587,
       secure: !!account.secure,
       username: account.username || '',
-      password: account.password || '',
+      password: '',
+      hasStoredPassword: !!account.hasStoredPassword,
       fromName: account.fromName || '',
       fromEmail: account.fromEmail || '',
       replyTo: account.replyTo || '',
@@ -415,7 +1243,7 @@ function Settings({ isActive }) {
 
   const resetAccountForm = () => {
     setAccountForm({
-      name: '', host: '', port: 587, secure: false, username: '', password: '',
+      name: '', host: '', port: 587, secure: false, username: '', password: '', hasStoredPassword: false,
       fromName: '', fromEmail: '', replyTo: '', unsubscribeEmail: '',
       dailyLimit: 500, isDefault: false, rejectUnauthorized: true,
       warmUpEnabled: false, warmUpStartDate: '',
@@ -535,6 +1363,27 @@ function Settings({ isActive }) {
     }
   };
 
+  const handleAutoBackupEnabledChange = async (enabled) => {
+    const updated = { ...autoBackupConfig, enabled };
+    setAutoBackupConfig(updated);
+    try {
+      await window.electron?.backup?.autoConfig?.(updated);
+      addToast(enabled ? 'Auto-backup enabled' : 'Auto-backup disabled', 'success');
+    } catch (error) {
+      addToast('Failed to update auto-backup settings', 'error');
+    }
+  };
+
+  const handleAutoBackupIntervalChange = async (intervalHours) => {
+    const updated = { ...autoBackupConfig, intervalHours };
+    setAutoBackupConfig(updated);
+    try {
+      await window.electron?.backup?.autoConfig?.(updated);
+    } catch (error) {
+      addToast('Failed to update auto-backup schedule', 'error');
+    }
+  };
+
   const handleCheckDomain = async () => {
     const domain = getEffectiveSendingDomain();
     if (!domain) {
@@ -563,9 +1412,37 @@ function Settings({ isActive }) {
     }
   };
 
+  const handleToggleAiEnabled = async (enabled) => {
+    const nextSettings = { ...aiSettings, enabled };
+    setAiSettings(nextSettings);
+    try { localStorage.setItem('bulky_sidebar_ai_enabled', enabled ? '1' : '0'); } catch {}
+    try {
+      const result = await window.electron?.ai?.saveSettings(buildAiSettingsPayload(nextSettings));
+      if (result?.error) {
+        addToast('Failed to update AI settings: ' + result.error, 'error');
+        return;
+      }
+      syncAiSettingsAfterSave(nextSettings, result);
+      addToast(enabled ? 'AI assistant enabled' : 'AI assistant hidden from sidebar', 'success');
+    } catch (error) {
+      addToast('Failed to update AI settings', 'error');
+    }
+  };
+
+  const openGuide = () => navigateTo('/guide');
+
   const effectiveFromEmail = getEffectiveFromEmail();
   const effectiveSendingDomain = getEffectiveSendingDomain();
   const smtpHealthById = new Map((smtpHealth || []).map((entry) => [entry.id, entry]));
+  const todayKey = new Date().toISOString().split('T')[0];
+  const getFreshSentToday = (entry = {}) => {
+    if (!entry) return 0;
+    const lastResetDate = String(entry.lastResetDate || '').trim();
+    if (lastResetDate && lastResetDate !== todayKey) {
+      return 0;
+    }
+    return Number(entry.sentToday) || 0;
+  };
   const totalAccounts = smtpAccounts.length;
   const activeAccounts = smtpHealth.length > 0
     ? smtpHealth.filter((entry) => entry.isActive).length
@@ -573,7 +1450,7 @@ function Settings({ isActive }) {
   const totalDailyLimit = (smtpHealth.length > 0 ? smtpHealth : smtpAccounts)
     .reduce((sum, entry) => sum + (Number(entry.dailyLimit) || 0), 0);
   const totalUsedToday = (smtpHealth.length > 0 ? smtpHealth : smtpAccounts)
-    .reduce((sum, entry) => sum + (Number(entry.sentToday) || 0), 0);
+    .reduce((sum, entry) => sum + getFreshSentToday(entry), 0);
   const remainingCapacity = Math.max(totalDailyLimit - totalUsedToday, 0);
   const warmupAccounts = (smtpHealth.length > 0 ? smtpHealth : smtpAccounts)
     .filter((entry) => entry.warmUpEnabled)
@@ -592,10 +1469,20 @@ function Settings({ isActive }) {
   const readinessScore = Math.round((readinessChecks.filter(Boolean).length / readinessChecks.length) * 100);
   const readinessTone = readinessScore >= 80 ? 'var(--success)' : readinessScore >= 55 ? 'var(--warning)' : 'var(--error)';
   const senderFootprint = effectiveSendingDomain || 'No sender domain configured';
+  const inboxReadinessGuardrails = buildInboxReadinessGuardrails({
+    deliverabilityInfo,
+    smtpAccounts,
+    smtpSettings,
+    smtpHealth
+  });
+  const guardrailSummary = inboxReadinessGuardrails.reduce((summary, item) => {
+    summary[item.status] = (summary[item.status] || 0) + 1;
+    return summary;
+  }, { pass: 0, warn: 0, fail: 0 });
   const senderDomains = Array.from(new Set(smtpAccounts.map(account => getSenderDomain(account)).filter(Boolean)));
   const rotationReadyAccounts = smtpAccounts.filter((account) => {
     const healthSnapshot = smtpHealthById.get(account.id);
-    const sentToday = Number(healthSnapshot?.sentToday ?? account.sentToday ?? 0);
+    const sentToday = getFreshSentToday(healthSnapshot || account);
     const dailyLimit = Number(healthSnapshot?.dailyLimit ?? account.dailyLimit ?? 0);
     const underLimit = dailyLimit <= 0 || sentToday < dailyLimit;
     return !!account.isActive && !!getSenderEmail(account) && underLimit;
@@ -603,7 +1490,7 @@ function Settings({ isActive }) {
   const accountsNeedingAttention = smtpAccounts.filter((account) => {
     const healthSnapshot = smtpHealthById.get(account.id);
     const testResult = testResults[account.id];
-    const sentToday = Number(healthSnapshot?.sentToday ?? account.sentToday ?? 0);
+    const sentToday = getFreshSentToday(healthSnapshot || account);
     const dailyLimit = Number(healthSnapshot?.dailyLimit ?? account.dailyLimit ?? 0);
     const usagePct = dailyLimit > 0 ? (sentToday / dailyLimit) * 100 : 0;
     const accountHealth = Number(healthSnapshot?.health) || 0;
@@ -623,7 +1510,7 @@ function Settings({ isActive }) {
   };
 
   const getAccountRecommendation = (account, healthSnapshot, testResult) => {
-    const sentToday = Number(healthSnapshot?.sentToday ?? account.sentToday ?? 0);
+    const sentToday = getFreshSentToday(healthSnapshot || account);
     const dailyLimit = Number(healthSnapshot?.dailyLimit ?? account.dailyLimit ?? 0);
     const usagePct = dailyLimit > 0 ? (sentToday / dailyLimit) * 100 : 0;
     const accountHealth = Number(healthSnapshot?.health) || 0;
@@ -640,203 +1527,34 @@ function Settings({ isActive }) {
 
   if (loading) {
     return (
-      <div className="text-center text-muted" style={{ padding: '100px' }}>
-        Loading settings...
+      <div className="settings-loading">
+        <RefreshCw size={24} style={{ animation: 'spin 1.2s linear infinite', opacity: 0.4 }} />
       </div>
     );
   }
 
+  /* ── Tab groups — CONNECTION / DELIVERABILITY / SYSTEM ── */
   return (
-    <div>
-      <div className="page-header flex justify-between items-center">
-        <div>
-          <h1 className="page-title">Settings</h1>
-          <p className="page-subtitle">Configure your email sending settings.</p>
-        </div>
-        <button className="btn btn-outline btn-sm" onClick={() => refreshSettingsSurface()}>
-          <RefreshCw size={14} /> Refresh Surface
-        </button>
-      </div>
+    <div className="settings-shell">
+      {/* ── Vertical grouped tab sidebar ── */}
+      <SettingsSidebar
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        onRefresh={refreshSettingsSurface}
+        hasCapability={hasCapability}
+      />
 
-      <div className="tabs">
-        <button
-          className={`tab ${activeTab === 'smtp' ? 'active' : ''}`}
-          onClick={() => setActiveTab('smtp')}
-        >
-          <Server size={16} style={{ marginRight: '6px' }} />
-          SMTP Configuration
-        </button>
-        <button
-          className={`tab ${activeTab === 'accounts' ? 'active' : ''}`}
-          onClick={() => setActiveTab('accounts')}
-        >
-          <Key size={16} style={{ marginRight: '6px' }} />
-          SMTP Accounts
-        </button>
-        <button
-          className={`tab ${activeTab === 'deliverability' ? 'active' : ''}`}
-          onClick={() => setActiveTab('deliverability')}
-        >
-          <Shield size={16} style={{ marginRight: '6px' }} />
-          Deliverability
-        </button>
-        <button
-          className={`tab ${activeTab === 'domain' ? 'active' : ''}`}
-          onClick={() => setActiveTab('domain')}
-        >
-          <Search size={16} style={{ marginRight: '6px' }} />
-          Domain Health
-        </button>
-        <button
-          className={`tab ${activeTab === 'general' ? 'active' : ''}`}
-          onClick={() => setActiveTab('general')}
-        >
-          <SettingsIcon size={16} style={{ marginRight: '6px' }} />
-          General
-        </button>
-        <button
-          className={`tab ${activeTab === 'ai' ? 'active' : ''}`}
-          onClick={() => setActiveTab('ai')}
-        >
-          <Sparkles size={16} style={{ marginRight: '6px' }} />
-          AI
-        </button>
-        <button
-          className={`tab ${activeTab === 'backup' ? 'active' : ''}`}
-          onClick={() => setActiveTab('backup')}
-        >
-          <Database size={16} style={{ marginRight: '6px' }} />
-          Backup & Restore
-        </button>
-      </div>
-
-      {/* ===== SMTP CONFIGURATION TAB ===== */}
-      {activeTab === 'smtp' && (
-        <div className="card">
-          <h3 className="card-title mb-4">SMTP Server Settings</h3>
-          <p className="text-muted mb-4">
-            Configure your primary outgoing mail server. These settings are required to send emails.
-          </p>
-
-          <div className="form-row">
-            <div className="form-group">
-              <label className="form-label">SMTP Host *</label>
-              <input type="text" className="form-input" placeholder="smtp.example.com"
-                value={smtpSettings.host}
-                onChange={(e) => setSmtpSettings({ ...smtpSettings, host: e.target.value })}
-              />
-            </div>
-            <div className="form-group">
-              <label className="form-label">Port *</label>
-              <input type="number" className="form-input" placeholder="587"
-                value={smtpSettings.port}
-                onChange={(e) => setSmtpSettings({ ...smtpSettings, port: parseInt(e.target.value) })}
-              />
-            </div>
-          </div>
-
-          <div className="form-row">
-            <div className="form-group">
-              <label className="form-label">Username *</label>
-              <input type="text" className="form-input" placeholder="your@email.com"
-                value={smtpSettings.username}
-                onChange={(e) => setSmtpSettings({ ...smtpSettings, username: e.target.value })}
-              />
-            </div>
-            <div className="form-group">
-              <label className="form-label">Password *</label>
-              <input type="password" className="form-input" placeholder="••••••••"
-                value={smtpSettings.password}
-                onChange={(e) => setSmtpSettings({ ...smtpSettings, password: e.target.value })}
-              />
-            </div>
-          </div>
-
-          <div className="form-group">
-            <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <input type="checkbox" checked={smtpSettings.secure}
-                onChange={(e) => setSmtpSettings({ ...smtpSettings, secure: e.target.checked })}
-              />
-              Use SSL/TLS (port 465)
-            </label>
-          </div>
-
-          <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '24px 0' }} />
-
-          <h4 style={{ marginBottom: '16px' }}>Sender Information</h4>
-
-          <div className="form-row">
-            <div className="form-group">
-              <label className="form-label">From Name *</label>
-              <input type="text" className="form-input" placeholder="Your Name or Company"
-                value={smtpSettings.fromName}
-                onChange={(e) => setSmtpSettings({ ...smtpSettings, fromName: e.target.value })}
-              />
-            </div>
-            <div className="form-group">
-              <label className="form-label">From Email *</label>
-              <input type="email" className="form-input" placeholder="noreply@yourdomain.com"
-                value={smtpSettings.fromEmail}
-                onChange={(e) => setSmtpSettings({ ...smtpSettings, fromEmail: e.target.value })}
-              />
-            </div>
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">Reply-To Email</label>
-            <input type="email" className="form-input" placeholder="replies@yourdomain.com (optional)"
-              value={smtpSettings.replyTo || ''}
-              onChange={(e) => setSmtpSettings({ ...smtpSettings, replyTo: e.target.value })}
-            />
-            <small className="text-muted">Where replies should go (defaults to From Email)</small>
-          </div>
-
-          <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '24px 0' }} />
-
-          <h4 style={{ marginBottom: '16px' }}>Unsubscribe Headers</h4>
-          <p className="text-muted mb-3" style={{ fontSize: '13px' }}>
-            Adding unsubscribe options helps your emails reach the inbox.
-          </p>
-
-          <div className="form-row">
-            <div className="form-group">
-              <label className="form-label">Unsubscribe Email</label>
-              <input type="email" className="form-input" placeholder="unsubscribe@yourdomain.com"
-                value={smtpSettings.unsubscribeEmail || ''}
-                onChange={(e) => setSmtpSettings({ ...smtpSettings, unsubscribeEmail: e.target.value })}
-              />
-              <small className="text-muted">Adds List-Unsubscribe header</small>
-            </div>
-            <div className="form-group">
-              <label className="form-label">Unsubscribe URL</label>
-              <input type="url" className="form-input" placeholder="https://yourdomain.com/unsubscribe"
-                value={smtpSettings.unsubscribeUrl || ''}
-                onChange={(e) => setSmtpSettings({ ...smtpSettings, unsubscribeUrl: e.target.value })}
-              />
-              <small className="text-muted">Alternative to email (use one)</small>
-            </div>
-          </div>
-
-          <div className="flex gap-3 mt-4">
-            <button className="btn btn-primary" onClick={handleSaveSmtp}>
-              <Save size={16} /> Save Settings
-            </button>
-            <button className="btn btn-outline" onClick={handleTestConnection} disabled={testing}>
-              <TestTube size={16} /> {testing ? 'Testing...' : 'Test Connection'}
-            </button>
-          </div>
-
-          <div className="card mt-4" style={{ background: 'var(--bg-tertiary)', padding: '16px' }}>
-            <h5 style={{ fontSize: '14px', marginBottom: '12px' }}>Common SMTP Settings:</h5>
-            <div className="text-sm text-muted">
-              <p><strong>Gmail:</strong> smtp.gmail.com, Port 587, Use App Password</p>
-              <p><strong>Outlook:</strong> smtp-mail.outlook.com, Port 587</p>
-              <p><strong>cPanel:</strong> mail.yourdomain.com, Port 465 (SSL) or 587</p>
-              <p><strong>Amazon SES:</strong> email-smtp.[region].amazonaws.com, Port 587</p>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* ── Content panel ── */}
+      <div className="settings-content">
+        {activeTab === 'smtp' && (
+          <SmtpConfigTab
+            smtpSettings={smtpSettings}
+            setSmtpSettings={setSmtpSettings}
+            handleSaveSmtp={handleSaveSmtp}
+            handleTestConnection={handleTestConnection}
+            testing={testing}
+          />
+        )}
 
       {/* ===== SMTP ACCOUNTS TAB ===== */}
       {activeTab === 'accounts' && (
@@ -939,7 +1657,7 @@ function Settings({ isActive }) {
               {smtpAccounts.map(account => {
                 const testResult = testResults[account.id];
                 const healthSnapshot = smtpHealthById.get(account.id);
-                const dailyUsed = healthSnapshot?.sentToday ?? account.sentToday ?? 0;
+                const dailyUsed = getFreshSentToday(healthSnapshot || account);
                 const dailyLimit = healthSnapshot?.dailyLimit ?? account.dailyLimit ?? 500;
                 const usagePct = dailyLimit > 0 ? Math.min((dailyUsed / dailyLimit) * 100, 100) : 0;
                 const accountHealth = Number(healthSnapshot?.health) || 0;
@@ -1120,10 +1838,15 @@ function Settings({ isActive }) {
               </div>
               <div className="form-group">
                 <label className="form-label">Password *</label>
-                <input type="password" className="form-input" placeholder="••••••••"
+                <input type="password" className="form-input" placeholder={accountForm.hasStoredPassword ? 'Leave blank to keep the saved password' : '...'}
                   value={accountForm.password}
                   onChange={(e) => setAccountForm({ ...accountForm, password: e.target.value })}
                 />
+                <small className="text-muted">
+                  {accountForm.hasStoredPassword
+                    ? 'A password is already stored locally. Enter a new one only if you want to replace it.'
+                    : 'The password is stored locally and will not be sent back into the renderer after it is saved.'}
+                </small>
               </div>
             </div>
 
@@ -1169,7 +1892,7 @@ function Settings({ isActive }) {
                 value={accountForm.unsubscribeEmail}
                 onChange={(e) => setAccountForm({ ...accountForm, unsubscribeEmail: e.target.value })}
               />
-              <small className="text-muted">Added to List-Unsubscribe header — improves inbox placement</small>
+              <small className="text-muted">Added to the List-Unsubscribe header to improve inbox readiness and recipient trust.</small>
             </div>
 
             {/* DKIM Configuration */}
@@ -1279,8 +2002,8 @@ function Settings({ isActive }) {
               <div className="insight-label">Tracking Surface</div>
               <div className="insight-meta">
                 {String(deliverabilityInfo.trackingDomain || '').trim()
-                  ? `Using ${deliverabilityInfo.trackingDomain}`
-                  : 'Using the built-in localhost tracking domain'}
+                  ? `Using ${deliverabilityInfo.trackingDomain} with public tracking mode`
+                  : 'Using the built-in localhost tracking domain for local-only tracking'}
               </div>
             </div>
 
@@ -1294,6 +2017,59 @@ function Settings({ isActive }) {
                   ? 'Best for smaller conversational or transactional sends.'
                   : 'Best for campaigns with proper unsubscribe and footer compliance.'}
               </div>
+            </div>
+          </div>
+
+          <div className="card">
+            <div className="flex justify-between items-start gap-3 mb-4">
+              <div>
+                <h3 className="card-title mb-2"><Shield size={20} style={{ marginRight: '8px' }} /> Inbox Readiness Guardrails</h3>
+                <p className="text-muted text-sm">
+                  These checks turn your current SMTP, DNS, and compliance setup into a quick send-readiness review before you push live volume.
+                </p>
+              </div>
+              <div className="text-sm text-muted" style={{ textAlign: 'right' }}>
+                <div><strong style={{ color: 'var(--success)' }}>{guardrailSummary.pass}</strong> passed</div>
+                <div><strong style={{ color: 'var(--warning)' }}>{guardrailSummary.warn}</strong> review</div>
+                <div><strong style={{ color: 'var(--error)' }}>{guardrailSummary.fail}</strong> blocking</div>
+              </div>
+            </div>
+
+            <div className="panel-grid">
+              {inboxReadinessGuardrails.map((item) => {
+                const Icon = item.status === 'pass' ? CheckCircle : item.status === 'warn' ? AlertTriangle : XCircle;
+                const accent = item.status === 'pass'
+                  ? 'var(--success)'
+                  : item.status === 'warn'
+                    ? 'var(--warning)'
+                    : 'var(--error)';
+
+                return (
+                  <div
+                    key={item.id}
+                    style={{
+                      border: `1px solid ${accent}22`,
+                      background: `linear-gradient(180deg, ${accent}12 0%, rgba(255,255,255,0) 100%)`,
+                      borderRadius: '14px',
+                      padding: '16px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '10px'
+                    }}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Icon size={16} style={{ color: accent, flexShrink: 0 }} />
+                      <strong style={{ fontSize: '14px' }}>{item.title}</strong>
+                    </div>
+                    <div className="text-sm" style={{ color: 'var(--text-primary)', lineHeight: 1.5 }}>
+                      {item.detail}
+                    </div>
+                    <div className="text-sm text-muted">
+                      Next step: {item.nextStep}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
 
@@ -1389,10 +2165,10 @@ function Settings({ isActive }) {
                 value={deliverabilityInfo.sendingMode || 'bulk'}
                 onChange={(e) => setDeliverabilityInfo({ ...deliverabilityInfo, sendingMode: e.target.value })}
               >
-                <option value="bulk">Bulk / Marketing — includes List-Unsubscribe header</option>
-                <option value="personal">Personal / Transactional — omits List-Unsubscribe (better Primary inbox)</option>
+                <option value="bulk">Bulk / Marketing -- includes List-Unsubscribe header</option>
+                <option value="personal">Personal / Transactional -- omits List-Unsubscribe (better Primary inbox)</option>
               </select>
-              <small className="text-muted">Personal mode omits the List-Unsubscribe header — Gmail is less likely to route to Promotions.</small>
+              <small className="text-muted">Personal mode omits the List-Unsubscribe header -- Gmail is less likely to route to Promotions.</small>
             </div>
 
             {/* Physical Address (CAN-SPAM / GDPR requirement) */}
@@ -1406,7 +2182,7 @@ function Settings({ isActive }) {
               <small className="text-muted">CAN-SPAM and GDPR require a physical address in bulk emails. Auto-appended to every campaign email footer.</small>
             </div>
 
-            {/* DNS Status Display — synced from Domain Health checks */}
+            {/* DNS Status Display - synced from Domain Health checks */}
             <div style={{ marginTop: '16px' }}>
               <h4 style={{ fontSize: '14px', marginBottom: '12px' }}>DNS Configuration Status</h4>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px' }}>
@@ -1668,340 +2444,108 @@ function Settings({ isActive }) {
         </div>
       )}
 
-      {/* ===== GENERAL TAB ===== */}
-      {activeTab === 'general' && (
-        <div className="card">
-          <h3 className="card-title mb-4">General Settings</h3>
-
-          <div className="form-group">
-            <label className="form-label">Theme</label>
-            <div style={{ display: 'flex', gap: '12px' }}>
-              <button
-                className={`btn ${theme === 'dark' ? 'btn-primary' : 'btn-outline'}`}
-                onClick={() => toggleTheme('dark')}
-                style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
-              >
-                <Moon size={18} /> Dark Mode
-              </button>
-              <button
-                className={`btn ${theme === 'light' ? 'btn-primary' : 'btn-outline'}`}
-                onClick={() => toggleTheme('light')}
-                style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
-              >
-                <Sun size={18} /> Light Mode
-              </button>
-            </div>
-          </div>
-
-          <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '24px 0' }} />
-
-          <h4 style={{ marginBottom: '16px' }}>Default Campaign Settings</h4>
-
-          <div className="form-row">
-            <div className="form-group">
-              <label className="form-label">Default Batch Size</label>
-              <input type="number" className="form-input"
-                value={appSettings.defaultBatchSize}
-                onChange={(e) => setAppSettings({ ...appSettings, defaultBatchSize: parseInt(e.target.value) })}
-              />
-              <small className="text-muted">Emails sent per batch</small>
-            </div>
-            <div className="form-group">
-              <label className="form-label">Default Delay (minutes)</label>
-              <input type="number" className="form-input"
-                value={appSettings.defaultDelayMinutes}
-                onChange={(e) => setAppSettings({ ...appSettings, defaultDelayMinutes: parseInt(e.target.value) })}
-              />
-              <small className="text-muted">Wait time between batches</small>
-            </div>
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">Max Retries Per Email</label>
-            <input type="number" className="form-input" style={{ maxWidth: '200px' }}
-              value={appSettings.maxRetriesPerEmail}
-              onChange={(e) => setAppSettings({ ...appSettings, maxRetriesPerEmail: parseInt(e.target.value) })}
-            />
-            <small className="text-muted">How many times to retry failed emails</small>
-          </div>
-
-          <button className="btn btn-primary mt-4" onClick={handleSaveApp}>
-            <Save size={16} /> Save Settings
-          </button>
-
-          <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '24px 0' }} />
-
-          {/* Import / Export Settings */}
-          <h4 style={{ marginBottom: '16px' }}>Import / Export Settings</h4>
-          <p className="text-muted text-sm mb-3">
-            Export all settings (SMTP, preferences, warmup) to a file, or import from a previous export.
-          </p>
-          <div className="flex gap-3">
-            <button className="btn btn-outline" onClick={handleExportSettings}>
-              <Download size={16} /> Export Settings
-            </button>
-            <button className="btn btn-outline" onClick={handleImportSettings}>
-              <Upload size={16} /> Import Settings
-            </button>
-          </div>
-
-          <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '24px 0' }} />
-
-          <h4 style={{ marginBottom: '16px' }}>About</h4>
-          <div className="text-muted">
-            <p><strong>Bulky Email Sender</strong> v3.5.0</p>
-            <p>by AllenRetro</p>
-            <p className="mt-2">Professional bulk email sender without subscription limitations.</p>
-            <p className="mt-2 text-sm">New in v3.5: Tracking, Tags, Scheduling, Spintax, Multi-SMTP, Warmup</p>
-          </div>
-        </div>
-      )}
-
-      {/* ===== AI TAB ===== */}
-      {activeTab === 'ai' && (
-        <div className="card">
-          <h3 className="card-title mb-4">
-            <Sparkles size={20} style={{ marginRight: '8px', color: 'var(--accent)' }} />
-            AI Intelligence (OpenRouter)
-          </h3>
-          <p className="text-muted mb-4" style={{ fontSize: '13px' }}>
-            Connect to OpenRouter to unlock AI-powered subject line optimization, content analysis, and email generation. Get a free API key at <a href="https://openrouter.ai" target="_blank" rel="noopener noreferrer">openrouter.ai</a>
-          </p>
-
-          <div className="form-group">
-            <label className="form-label">API Key</label>
-            <input
-              type="password"
-              className="form-input"
-              placeholder="sk-or-v1-..."
-              value={aiSettings.apiKey}
-              onChange={(e) => setAiSettings({ ...aiSettings, apiKey: e.target.value })}
-            />
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">Model</label>
-            <select
-              className="form-select"
-              value={aiSettings.model}
-              onChange={(e) => setAiSettings({ ...aiSettings, model: e.target.value })}
-            >
-              <optgroup label="Free Models">
-                <option value="meta-llama/llama-3.1-8b-instruct:free">Llama 3.1 8B (Free)</option>
-                <option value="mistralai/mistral-7b-instruct:free">Mistral 7B (Free)</option>
-                <option value="google/gemma-2-9b-it:free">Gemma 2 9B (Free)</option>
-              </optgroup>
-              <optgroup label="OpenAI (Paid)">
-                <option value="openai/gpt-4o">GPT-4o</option>
-                <option value="openai/gpt-4o-mini">GPT-4o Mini</option>
-                <option value="openai/gpt-4-turbo">GPT-4 Turbo</option>
-                <option value="openai/o1">OpenAI o1</option>
-                <option value="openai/o1-mini">OpenAI o1 Mini</option>
-                <option value="openai/o3-mini">OpenAI o3 Mini</option>
-              </optgroup>
-              <optgroup label="Anthropic (Paid)">
-                <option value="anthropic/claude-3.5-sonnet">Claude 3.5 Sonnet</option>
-                <option value="anthropic/claude-3.5-haiku">Claude 3.5 Haiku</option>
-                <option value="anthropic/claude-3-opus">Claude 3 Opus</option>
-              </optgroup>
-              <optgroup label="Google (Paid)">
-                <option value="google/gemini-2.0-flash-001">Gemini 2.0 Flash</option>
-                <option value="google/gemini-pro-1.5">Gemini 1.5 Pro</option>
-              </optgroup>
-              <optgroup label="Mistral (Paid)">
-                <option value="mistralai/mistral-large">Mistral Large</option>
-                <option value="mistralai/mixtral-8x22b-instruct">Mixtral 8x22B</option>
-              </optgroup>
-              <optgroup label="Meta Llama (Paid)">
-                <option value="meta-llama/llama-3.3-70b-instruct">Llama 3.3 70B</option>
-                <option value="meta-llama/llama-3.1-405b-instruct">Llama 3.1 405B</option>
-              </optgroup>
-              <optgroup label="DeepSeek (Paid)">
-                <option value="deepseek/deepseek-chat">DeepSeek V3</option>
-                <option value="deepseek/deepseek-r1">DeepSeek R1</option>
-              </optgroup>
-              <optgroup label="xAI (Paid)">
-                <option value="x-ai/grok-2">Grok 2</option>
-                <option value="x-ai/grok-3-mini-beta">Grok 3 Mini</option>
-              </optgroup>
-            </select>
-            <small className="text-muted">Paid models require credits on your OpenRouter account</small>
-          </div>
-
-          <div className="flex gap-2">
-            <button className="btn btn-primary" onClick={handleSaveAiSettings}>
-              <Save size={16} /> Save Settings
-            </button>
-            <button className="btn btn-outline" onClick={handleTestAi} disabled={aiTesting}>
-              <TestTube size={16} /> {aiTesting ? 'Testing...' : 'Test Connection'}
-            </button>
-          </div>
-
-          <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '24px 0' }} />
-
-          <h4 style={{ fontSize: '14px', marginBottom: '12px' }}>What AI Can Do in Bulky</h4>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '12px' }}>
-            {[
-              { title: 'Subject Line Optimizer', desc: 'Generate 5 high-performing subject line variations' },
-              { title: 'Content Analysis', desc: 'Score your email content and get improvement tips' },
-              { title: 'Email Generator', desc: 'Generate full email content from a simple prompt' },
-              { title: 'Template Block Builder', desc: 'Generate structured drag-and-drop template blocks from a prompt' },
-              { title: 'Local Insights', desc: 'Offline analysis of length, personalization, CTA, and spam risk' },
-              { title: '20+ Models', desc: 'GPT-4o, Claude 3.5, Gemini 2.0, Grok, DeepSeek, Llama, and more' }
-            ].map((f, i) => (
-              <div key={i} style={{ padding: '14px', background: 'var(--bg-tertiary)', borderRadius: '8px', border: '1px solid var(--border)' }}>
-                <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text)', marginBottom: '4px' }}>{f.title}</div>
-                <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{f.desc}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* ===== BACKUP TAB ===== */}
-      {activeTab === 'backup' && (
-        <div className="card">
-          <h3 className="card-title mb-4"><Database size={20} style={{ marginRight: '8px' }} /> Backup & Restore</h3>
-          <p className="text-muted mb-4">
-            Create backups of your entire database including contacts, campaigns, templates, and settings.
-          </p>
-
-          {/* Database Info */}
-          {backupInfo && (
-            <div style={{
-              background: 'var(--bg-secondary)', padding: '16px', borderRadius: '8px', marginBottom: '24px',
-              display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px'
-            }}>
-              <div>
-                <div className="text-sm text-muted">Database Size</div>
-                <div style={{ fontSize: '18px', fontWeight: 600 }}><HardDrive size={16} style={{ marginRight: '6px' }} />{backupInfo.size}</div>
-              </div>
-              <div>
-                <div className="text-sm text-muted">Last Modified</div>
-                <div style={{ fontSize: '14px' }}>{backupInfo.lastModified}</div>
-              </div>
-              <div>
-                <div className="text-sm text-muted">Location</div>
-                <div style={{ fontSize: '12px', wordBreak: 'break-all' }}>{backupInfo.path}</div>
-              </div>
-            </div>
-          )}
-
-          {/* Backup Section */}
-          <div style={{ marginBottom: '32px' }}>
-            <h4 style={{ marginBottom: '12px' }}><Download size={18} style={{ marginRight: '8px' }} /> Create Backup</h4>
-            <p className="text-sm text-muted mb-3">
-              Export your entire database to a file. This includes all contacts, campaigns, templates, SMTP settings, and preferences.
+      {/* ===== SEED ACCOUNTS TAB ===== */}
+      {activeTab === 'seed' && (
+        <div>
+          <div className="card mb-4">
+            <h3 className="card-title mb-4"><Mail size={20} style={{ marginRight: '8px' }} /> Seed Accounts</h3>
+            <p className="text-muted mb-4">
+              Add seed email accounts at major providers (Gmail, Outlook, Yahoo, Apple) to test inbox placement. Bulky will send test emails to these accounts and report where they land.
             </p>
-            <button className="btn btn-primary" onClick={handleBackup} disabled={isBackingUp}>
-              {isBackingUp ? 'Creating Backup...' : <><Download size={16} /> Create Backup</>}
-            </button>
-          </div>
 
-          <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '24px 0' }} />
-
-          {/* Restore Section */}
-          <div>
-            <h4 style={{ marginBottom: '12px' }}><Upload size={18} style={{ marginRight: '8px' }} /> Restore Backup</h4>
-            <div style={{
-              background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)',
-              padding: '16px', borderRadius: '8px', marginBottom: '16px'
-            }}>
-              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
-                <AlertTriangle size={20} style={{ color: '#ef4444', flexShrink: 0, marginTop: '2px' }} />
-                <div>
-                  <strong style={{ color: '#ef4444' }}>Warning: This action cannot be undone!</strong>
-                  <p className="text-sm text-muted mt-1">
-                    Restoring a backup will completely replace all current data. Make sure to create a backup of your current data first if needed.
-                  </p>
-                </div>
+            <div className="form-row">
+              <div className="form-group" style={{ flex: 1 }}>
+                <label className="form-label">Email Address</label>
+                <input
+                  type="email"
+                  className="form-input"
+                  placeholder="seed@gmail.com"
+                  value={seedForm.email}
+                  onChange={(e) => setSeedForm({ ...seedForm, email: e.target.value })}
+                />
+              </div>
+              <div className="form-group" style={{ flex: 1 }}>
+                <label className="form-label">Provider</label>
+                <select
+                  className="form-select"
+                  value={seedForm.provider}
+                  onChange={(e) => setSeedForm({ ...seedForm, provider: e.target.value })}
+                >
+                  <option value="gmail">Gmail</option>
+                  <option value="outlook">Outlook</option>
+                  <option value="yahoo">Yahoo</option>
+                  <option value="apple">Apple Mail</option>
+                </select>
               </div>
             </div>
-            <button
-              className="btn btn-outline"
-              style={{ borderColor: '#ef4444', color: '#ef4444' }}
-              onClick={handleRestore}
-              disabled={isRestoring}
-            >
-              {isRestoring ? 'Restoring...' : <><Upload size={16} /> Restore from Backup</>}
-            </button>
-          </div>
-
-          <div style={{ marginTop: '24px' }}>
-            <h4 style={{ marginBottom: '12px' }}>
-              <Trash2 size={18} style={{ marginRight: '8px', color: '#ef4444' }} /> Reset Everything
-            </h4>
-            <div style={{
-              background: 'rgba(239, 68, 68, 0.1)',
-              border: '1px solid rgba(239, 68, 68, 0.3)',
-              padding: '16px',
-              borderRadius: '8px',
-              marginBottom: '16px'
-            }}>
-              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
-                <AlertTriangle size={20} style={{ color: '#ef4444', flexShrink: 0, marginTop: '2px' }} />
-                <div>
-                  <strong style={{ color: '#ef4444' }}>WARNING: Cannot be undone</strong>
-                  <p className="text-sm text-muted mt-1">
-                    This will delete ALL Bulky data stored in the database (contacts, campaigns, templates, SMTP accounts, tracking, schedules, segments, blacklist/unsubscribes) and internal logs, then restart the app.
-                  </p>
-                </div>
-              </div>
-            </div>
-            <button
-              className="btn btn-outline"
-              style={{ borderColor: '#ef4444', color: '#ef4444' }}
-              onClick={handleResetEverything}
-              disabled={isResetting}
-            >
-              {isResetting ? 'Resetting...' : <><Trash2 size={16} /> Reset Everything</>}
-            </button>
-          </div>
-
-          <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '24px 0' }} />
-
-          {/* Auto-Backup Config */}
-          <div style={{ marginBottom: '24px' }}>
-            <h4 style={{ marginBottom: '12px' }}><RefreshCw size={18} style={{ marginRight: '8px' }} /> Auto-Backup</h4>
-            <p className="text-sm text-muted mb-3">Automatically back up your database on a schedule. Last 5 auto-backups are kept.</p>
-            <div className="flex gap-3 items-center">
+            <div className="form-group">
               <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
-                <input type="checkbox" checked={autoBackupConfig.enabled}
-                  onChange={(e) => {
-                    const updated = { ...autoBackupConfig, enabled: e.target.checked };
-                    setAutoBackupConfig(updated);
-                    window.electron.backup.autoConfig(updated);
-                    addToast(e.target.checked ? 'Auto-backup enabled' : 'Auto-backup disabled', 'success');
-                  }} />
-                Enable auto-backup
+                <input
+                  type="checkbox"
+                  checked={seedForm.isActive}
+                  onChange={(e) => setSeedForm({ ...seedForm, isActive: e.target.checked })}
+                />
+                <span>Active</span>
               </label>
-              <select className="form-select" style={{ width: '180px' }} value={autoBackupConfig.intervalHours}
-                onChange={(e) => {
-                  const updated = { ...autoBackupConfig, intervalHours: parseInt(e.target.value) };
-                  setAutoBackupConfig(updated);
-                  window.electron.backup.autoConfig(updated);
-                }}>
-                <option value="6">Every 6 hours</option>
-                <option value="12">Every 12 hours</option>
-                <option value="24">Every 24 hours</option>
-                <option value="72">Every 3 days</option>
-                <option value="168">Weekly</option>
-              </select>
             </div>
+            <button
+              className="btn btn-primary"
+              onClick={createSeed}
+              disabled={seedLoading || !seedForm.email.trim()}
+            >
+              {seedLoading ? 'Adding...' : <><Plus size={16} /> Add Seed Account</>}
+            </button>
           </div>
 
-          {/* Backup History */}
-          {backupHistory.length > 0 && (
-            <div>
-              <h4 style={{ marginBottom: '12px' }}><Database size={18} style={{ marginRight: '8px' }} /> Recent Backups</h4>
-              <div style={{ maxHeight: '200px', overflow: 'auto' }}>
-                {backupHistory.map((b, i) => (
-                  <div key={b.id || i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px', borderBottom: '1px solid var(--border)', fontSize: '13px' }}>
-                    <div>
-                      <span style={{ fontWeight: 500 }}>{b.filename}</span>
-                      <span className={`badge badge-${b.type === 'auto' ? 'info' : 'default'} ml-2`}>{b.type}</span>
+          {seedAccounts.length > 0 && (
+            <div className="card">
+              <h4 className="card-title mb-3">Configured Seed Accounts</h4>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                {seedAccounts.map((acc) => (
+                  <div
+                    key={acc.id}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '12px 16px',
+                      borderRadius: '10px',
+                      background: acc.isActive ? 'rgba(34,197,94,0.06)' : 'var(--bg-tertiary)',
+                      border: `1px solid ${acc.isActive ? 'rgba(34,197,94,0.2)' : 'var(--border)'}`,
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                      <span
+                        style={{
+                          width: '8px',
+                          height: '8px',
+                          borderRadius: '50%',
+                          background: acc.isActive ? 'var(--success)' : 'var(--text-muted)',
+                        }}
+                      />
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: '14px' }}>{acc.email}</div>
+                        <div style={{ fontSize: '12px', color: 'var(--text-muted)', textTransform: 'capitalize' }}>
+                          {acc.provider}
+                        </div>
+                      </div>
                     </div>
-                    <div className="text-muted text-sm">{b.createdAt ? new Date(b.createdAt).toLocaleString() : ''}</div>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <button
+                        className="btn btn-outline btn-sm"
+                        onClick={() => toggleSeed(acc)}
+                        title={acc.isActive ? 'Deactivate' : 'Activate'}
+                      >
+                        {acc.isActive ? 'Deactivate' : 'Activate'}
+                      </button>
+                      <button
+                        className="btn btn-danger btn-sm"
+                        onClick={() => deleteSeed(acc.id)}
+                        title="Remove"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -2009,8 +2553,89 @@ function Settings({ isActive }) {
           )}
         </div>
       )}
+
+        {activeTab === 'general' && (
+          <GeneralSettingsTab
+            theme={theme}
+            toggleTheme={toggleTheme}
+            appSettings={appSettings}
+            setAppSettings={setAppSettings}
+            handleSaveApp={handleSaveApp}
+            handleExportSettings={handleExportSettings}
+            handleImportSettings={handleImportSettings}
+            systemDiagnostics={systemDiagnostics}
+            appVersion={appVersion}
+            formatBytes={formatBytes}
+            openGuide={openGuide}
+            entitlementState={entitlementState}
+          />
+        )}
+
+        {activeTab === 'cloud' && (
+          <CloudServicesTab
+            cloudConfig={cloudConfig}
+            setCloudConfig={setCloudConfig}
+            cloudStatus={cloudStatus}
+            accountStatus={accountStatus}
+            desktopAccountForm={desktopAccountForm}
+            setDesktopAccountForm={setDesktopAccountForm}
+            desktopSignUpForm={desktopSignUpForm}
+            setDesktopSignUpForm={setDesktopSignUpForm}
+            savingCloudConfig={savingCloudConfig}
+            loadingCloudConfig={loadingCloudConfig}
+            loadingAccountStatus={loadingAccountStatus}
+            submittingAccount={submittingAccount}
+            syncStatus={syncStatus}
+            loadingSyncStatus={loadingSyncStatus}
+            cloudDiagnostics={cloudDiagnostics}
+            testingCloudConnections={testingCloudConnections}
+            handleSaveCloudConfig={handleSaveCloudConfig}
+            handleRefreshCloudConfig={handleRefreshCloudConfig}
+            handleAccountSignUp={handleAccountSignUp}
+            handleAccountSignIn={handleAccountSignIn}
+            handleAccountSignOut={handleAccountSignOut}
+            handleAccountRefresh={handleAccountRefresh}
+            handleRunCloudDiagnostics={handleRunCloudDiagnostics}
+            handleSyncNow={handleSyncNow}
+            handleOpenCheckout={handleOpenCheckout}
+          />
+        )}
+
+        {activeTab === 'ai' && (
+          <AiSettingsTab
+            aiSettings={aiSettings}
+            setAiSettings={setAiSettings}
+            aiDiagnostics={aiDiagnostics}
+            openRouterModels={openRouterModels}
+            lmStudioModels={lmStudioModels}
+            lmStudioLoading={lmStudioLoading}
+            aiTesting={aiTesting}
+            loadLmStudioModels={loadLmStudioModels}
+            handleSaveAiSettings={handleSaveAiSettings}
+            handleTestAi={handleTestAi}
+            handleToggleAiEnabled={handleToggleAiEnabled}
+          />
+        )}
+
+        {activeTab === 'backup' && (
+          <BackupSettingsTab
+            backupInfo={backupInfo}
+            isBackingUp={isBackingUp}
+            isRestoring={isRestoring}
+            isResetting={isResetting}
+            handleBackup={handleBackup}
+            handleRestore={handleRestore}
+            handleResetEverything={handleResetEverything}
+            autoBackupConfig={autoBackupConfig}
+            handleAutoBackupEnabledChange={handleAutoBackupEnabledChange}
+            handleAutoBackupIntervalChange={handleAutoBackupIntervalChange}
+            backupHistory={backupHistory}
+          />
+        )}
+      </div>
     </div>
   );
 }
 
 export default Settings;
+

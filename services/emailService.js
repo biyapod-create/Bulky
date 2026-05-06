@@ -1,16 +1,18 @@
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
+const net = require('net');
 const { version: APP_VERSION } = require('../package.json');
 
 class EmailService {
   constructor(db, hmacSecret) {
     this.db = db;
     this.transporters = new Map();
+    this._pendingWaits = new Set();
     this.isPaused = false;
     this.isStopped = false;
     this.currentCampaignId = null;
     this.currentSmtpIndex = 0;
-    this.trackingBaseUrl = 'http://127.0.0.1:3847';
+    this.trackingBaseUrl = ''; // Empty by default - requires external domain configuration
 
     // Circuit breaker for SMTP failures with exponential backoff
     this.circuitBreaker = {
@@ -37,12 +39,12 @@ class EmailService {
       this._cleanupInterval.unref();
     }
 
-    // HMAC secret shared with main.js tracking server — must be the same value so tokens
+    // HMAC secret shared with main.js tracking server -- must be the same value so tokens
     // embedded in outgoing emails can be validated when users click unsubscribe links.
     this.hmacSecret = hmacSecret || crypto.randomBytes(32).toString('hex');
 
-    // Sending mode: 'bulk' (List-Unsubscribe header included → Gmail Promotions/Inbox)
-    //               'personal' (no List-Unsubscribe → Gmail Inbox, personal-feel emails)
+    // Sending mode: 'bulk' (List-Unsubscribe header included -> Gmail Promotions/Inbox)
+    //               'personal' (no List-Unsubscribe -> Gmail Inbox, personal-feel emails)
     this.sendingMode = 'bulk';
 
     // Physical company address appended to campaign emails (CAN-SPAM compliance).
@@ -126,6 +128,7 @@ class EmailService {
   }
 
   dispose() {
+    this._resolvePendingWaits();
     if (this._cleanupInterval) {
       clearInterval(this._cleanupInterval);
       this._cleanupInterval = null;
@@ -283,7 +286,7 @@ class EmailService {
       return value.charAt(0).toUpperCase() + value.slice(1).toLowerCase();
     });
 
-    // Unsubscribe link placeholders — createUnsubscribeUrl returns null when no
+    // Unsubscribe link placeholders -- createUnsubscribeUrl returns null when no
     // external tracking domain is set; replace with '' so the literal token or
     // 'null' string never appears in the sent email.
     if (campaign && campaign.id) {
@@ -363,12 +366,50 @@ class EmailService {
     }
   }
 
+  isPrivateTrackingBaseUrl(baseUrl = this.trackingBaseUrl) {
+    if (!baseUrl || typeof baseUrl !== 'string') return true;
+
+    try {
+      const parsed = new URL(baseUrl);
+      const hostname = String(parsed.hostname || '').toLowerCase();
+      if (!hostname) return true;
+
+      if (
+        hostname === 'localhost' ||
+        hostname === '::1' ||
+        hostname.endsWith('.local') ||
+        hostname.startsWith('127.') ||
+        hostname.startsWith('10.') ||
+        hostname.startsWith('192.168.')
+      ) {
+        return true;
+      }
+
+      const ipVersion = net.isIP(hostname);
+      if (ipVersion === 6 && hostname === '::1') {
+        return true;
+      }
+
+      const private172Match = hostname.match(/^172\.(\d+)\./);
+      if (private172Match) {
+        const octet = Number(private172Match[1]);
+        if (octet >= 16 && octet <= 31) {
+          return true;
+        }
+      }
+
+      return false;
+    } catch (error) {
+      return true;
+    }
+  }
+
   createUnsubscribeUrl(campaignId, contactId, email) {
     // SPAM FIX #1: never embed a loopback/private-IP URL in outbound mail.
     // When no external tracking domain is set return null so callers
     // fall back to a mailto: unsubscribe link instead.
     const baseUrl = this.getTrackingBaseUrl();
-    if (/127\.0\.0\.1|localhost|::1/i.test(baseUrl)) return null;
+    if (this.isPrivateTrackingBaseUrl(baseUrl)) return null;
 
     const params = new URLSearchParams({ email: email || '' });
     const token = this.generateUnsubscribeToken(email, campaignId);
@@ -377,10 +418,10 @@ class EmailService {
   }
 
   addOpenTracking(html, trackingId, campaignId, contactId) {
-    // Never embed a localhost/127.0.0.1 URL in outbound email — same rule as click tracking.
+    // Never embed a localhost/127.0.0.1 URL in outbound email -- same rule as click tracking.
     // Skip open-tracking pixel when no external domain is configured.
     const baseUrl = this.getTrackingBaseUrl();
-    if (/127\.0\.0\.1|localhost|::1/i.test(baseUrl)) return html;
+    if (this.isPrivateTrackingBaseUrl(baseUrl)) return html;
 
     const trackingUrl = `${baseUrl}/track/open/${campaignId}/${contactId || 'unknown'}/${trackingId}`;
     const trackingPixel = `<img src="${trackingUrl}" width="1" height="1" style="display:none;" alt="" />`;
@@ -395,8 +436,8 @@ class EmailService {
 
     // CRITICAL: never embed a localhost / private-IP URL in outbound emails.
     // If no external tracking domain is configured the click-tracking is
-    // silently skipped — private IPs in links are an automatic spam trigger.
-    const isLocalTracking = /127\.0\.0\.1|localhost/i.test(baseUrl);
+    // silently skipped -- private IPs in links are an automatic spam trigger.
+    const isLocalTracking = this.isPrivateTrackingBaseUrl(baseUrl);
     if (isLocalTracking) return html;
 
     return html.replace(/<a\s+([^>]*href=")([^"]+)(")/gi, (match, before, url, after) => {
@@ -462,7 +503,36 @@ class EmailService {
   }
 
   sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    const waitMs = Math.max(0, Number(ms) || 0);
+    if (waitMs === 0 || this.isStopped) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer = null;
+
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        this._pendingWaits.delete(finish);
+        resolve();
+      };
+
+      timer = setTimeout(finish, waitMs);
+      this._pendingWaits.add(finish);
+    });
+  }
+
+  _resolvePendingWaits() {
+    for (const finish of [...this._pendingWaits]) {
+      try { finish(); } catch {}
+    }
+    this._pendingWaits.clear();
   }
 
   getRandomDelay(baseMs) {
@@ -492,14 +562,14 @@ class EmailService {
     }
 
     if (campaign && campaign.id) {
-      // Open-tracking pixel: always embed — a hidden 0×0 image does not raise spam
-      // scores the same way redirect-links do, and it's required for opens to register
-      // against the local tracking server during testing AND via an external domain in prod.
+      // Open-tracking pixel: embed only when an external tracking domain is set.
+      // addOpenTracking() skips when the base URL is localhost/private-IP so
+      // that no private-network URLs appear in outbound emails.
       personalizedContent = this.addOpenTracking(personalizedContent, trackingId, campaign.id, contactId);
 
       // Click-tracking redirect links: only when an external domain is configured.
       // A 127.0.0.1 redirect URL inside an outbound email is an instant spam flag.
-      const isLocalTracking = /127\.0\.0\.1|localhost|::1/i.test(this.getTrackingBaseUrl());
+      const isLocalTracking = this.isPrivateTrackingBaseUrl(this.getTrackingBaseUrl());
       if (!isLocalTracking) {
         personalizedContent = this.addClickTracking(personalizedContent, trackingId, campaign.id, contactId);
       }
@@ -507,23 +577,23 @@ class EmailService {
       personalizedContent = this.addUnsubscribeLink(personalizedContent, campaign.id, contactId, contact.email, settings);
     }
 
-    // FIX #4: use SMTP host as Message-ID domain fallback — '@localhost' in
+    // FIX #4: use SMTP host as Message-ID domain fallback -- '@localhost' in
     // Message-ID is a textbook spam indicator recognised by every major filter.
     const domain = (settings.fromEmail && settings.fromEmail.includes('@'))
       ? settings.fromEmail.split('@')[1]
       : (settings.host ? settings.host.split(':')[0] : 'mail.invalid');
 
-    const isLocalTracking = /127\.0\.0\.1|localhost|::1/i.test(this.getTrackingBaseUrl());
+    const isLocalTracking = this.isPrivateTrackingBaseUrl(this.getTrackingBaseUrl());
 
     // Minimal, clean header set.
-    // — X-Priority / Importance removed: they flag bulk mail in SpamAssassin.
-    // — X-Mailer / Precedence removed: fingerprint bulk senders.
-    // — MIME-Version: nodemailer adds this automatically; duplicate causes warnings.
+    // -- X-Priority / Importance removed: they flag bulk mail in SpamAssassin.
+    // -- X-Mailer / Precedence removed: fingerprint bulk senders.
+    // -- MIME-Version: nodemailer adds this automatically; duplicate causes warnings.
     const headers = {
       'Message-ID': this.generateMessageId(domain),
     };
 
-    // Sender: header — removes Gmail 'sent via relay.com' banner when
+    // Sender: header -- removes Gmail 'sent via relay.com' banner when
     // the SMTP auth address differs from the From: address.
     const _authDomain = settings.username ? (settings.username.split('@')[1] || '') : '';
     const _fromDomainH = settings.fromEmail ? (settings.fromEmail.split('@')[1] || '') : '';
@@ -532,10 +602,10 @@ class EmailService {
     }
 
     // List-Unsubscribe:
-    //   • NEVER include a localhost/127.0.0.1 URL — private-IP in header = instant spam flag.
-    //   • Always prefer a real external tracking URL when available.
-    //   • Fall back to mailto: so the header is valid and Gmail shows the one-click button.
-    //   • In 'personal' sending mode, omit entirely so Gmail routes to Inbox, not Promotions.
+    //   * NEVER include a localhost/127.0.0.1 URL -- private-IP in header = instant spam flag.
+    //   * Always prefer a real external tracking URL when available.
+    //   * Fall back to mailto: so the header is valid and Gmail shows the one-click button.
+    //   * In 'personal' sending mode, omit entirely so Gmail routes to Inbox, not Promotions.
     const sendingMode = this.sendingMode || 'bulk';
     if (sendingMode !== 'personal') {
       const externalUnsubUrl = (!isLocalTracking && campaign)
@@ -557,11 +627,11 @@ class EmailService {
       to: contact.email,
       replyTo: settings.replyTo || settings.fromEmail,
       subject: personalizedSubject,
-      // Both text and HTML are required — missing text/plain is a strong spam signal.
+      // Both text and HTML are required -- missing text/plain is a strong spam signal.
       text: plainTextContent || this.htmlToPlainText(personalizedContent),
       html: personalizedContent,
       headers: headers,
-      // NOTE: 'envelope' removed — explicit envelope overrides cause SMTP rejection
+      // NOTE: 'envelope' removed -- explicit envelope overrides cause SMTP rejection
       // on many providers (SendGrid, AWS SES, Mailgun) when the envelope sender
       // doesn't match the authenticated username.
     };
@@ -581,6 +651,7 @@ class EmailService {
     this.isPaused = false;
     this.isStopped = false;
     this.currentCampaignId = campaign.id;
+    const reportProgress = typeof onProgress === 'function' ? onProgress : () => {};
 
     // Filter out blacklisted, unsubscribed, and previously bounced contacts
     const validContacts = [];
@@ -611,12 +682,12 @@ class EmailService {
       if (fromDomain && smtpHost && apexOf(fromDomain) !== apexOf(smtpHost)) {
         console.warn(
           `[SPF Alignment] fromEmail domain "${fromDomain}" differs from SMTP host "${smtpHost}". ` +
-          'SPF alignment may fail â use a fromEmail on the same domain as your SMTP server.'
+          'SPF alignment may fail — use a fromEmail on the same domain as your SMTP server.'
         );
       }
     }
 
-    // FIX #8: Warmup enforcement â ramp send volume for new accounts.
+    // FIX #8: Warmup enforcement -- ramp send volume for new accounts.
     if (smtpSettings.warmUpEnabled && smtpSettings.warmUpStartDate) {
       const startMs   = Date.parse(smtpSettings.warmUpStartDate);
       const daysSince = isNaN(startMs) ? 0 : Math.floor((Date.now() - startMs) / 86400000);
@@ -657,7 +728,7 @@ class EmailService {
     campaign.totalEmails = totalContacts;
     this.db.updateCampaign(campaign);
 
-    onProgress({
+    reportProgress({
       status: 'running',
       total: totalContacts,
       sent: 0,
@@ -709,7 +780,7 @@ class EmailService {
         };
 
         try {
-          // Circuit breaker check — throws if SMTP is in a prolonged failure state
+          // Circuit breaker check -- throws if SMTP is in a prolonged failure state
           this._circuitCheck();
 
           let activeTransporter = transporter;
@@ -732,7 +803,7 @@ class EmailService {
 
           const result = await this.sendSingleEmail(activeTransporter, activeSettings, contact, subject, content, campaign, variant);
           
-          // Success — close the circuit if it was probing
+          // Success -- close the circuit if it was probing
           this._circuitSuccess();
 
           sentCount++;
@@ -746,7 +817,7 @@ class EmailService {
           };
 
         } catch (error) {
-          // Circuit breaker open — skip this contact without counting as an SMTP bounce
+          // Circuit breaker open -- skip this contact without counting as an SMTP bounce
           if (error.code === 'SMTP_DAILY_LIMIT_REACHED') {
             failedCount++;
             this.isStopped = true;
@@ -815,7 +886,7 @@ class EmailService {
         campaign.bouncedEmails = bouncedCount;
         this.db.updateCampaign(campaign);
 
-        onProgress({
+        reportProgress({
           status: this.isPaused ? 'paused' : 'running',
           total: totalContacts,
           sent: sentCount,
@@ -835,7 +906,7 @@ class EmailService {
 
       // Batch delay
       if (i + batchSize < totalContacts && !this.isStopped) {
-        onProgress({
+        reportProgress({
           status: 'waiting',
           total: totalContacts,
           sent: sentCount,
@@ -857,7 +928,7 @@ class EmailService {
     campaign.bouncedEmails = bouncedCount;
     this.db.updateCampaign(campaign);
 
-    onProgress({
+    reportProgress({
       status: campaign.status,
       total: totalContacts,
       sent: sentCount,
@@ -895,11 +966,57 @@ class EmailService {
 
   pause() { this.isPaused = true; return { success: true }; }
   resume() { this.isPaused = false; return { success: true }; }
-  stop() { this.isStopped = true; this.isPaused = false; return { success: true }; }
+  stop() {
+    this.isStopped = true;
+    this.isPaused = false;
+    this._resolvePendingWaits();
+    return { success: true };
+  }
+
+  getState() {
+    return {
+      isPaused: this.isPaused,
+      isStopped: this.isStopped,
+      currentCampaignId: this.currentCampaignId,
+      currentSmtpIndex: this.currentSmtpIndex,
+      trackingBaseUrl: this.trackingBaseUrl,
+      sendingMode: this.sendingMode,
+      companyAddress: this.companyAddress,
+      circuitBreaker: { ...this.circuitBreaker }
+    };
+  }
+
+  setState(state = {}) {
+    if (!state || typeof state !== 'object') {
+      return { success: false };
+    }
+
+    this.isPaused = !!state.isPaused;
+    this.isStopped = !!state.isStopped;
+    this.currentCampaignId = state.currentCampaignId || null;
+    this.currentSmtpIndex = Number.isInteger(state.currentSmtpIndex) ? state.currentSmtpIndex : 0;
+    if (typeof state.trackingBaseUrl === 'string' && state.trackingBaseUrl.trim()) {
+      this.trackingBaseUrl = state.trackingBaseUrl.trim();
+    }
+    if (typeof state.sendingMode === 'string' && state.sendingMode.trim()) {
+      this.sendingMode = state.sendingMode.trim();
+    }
+    if (typeof state.companyAddress === 'string') {
+      this.companyAddress = state.companyAddress;
+    }
+    if (state.circuitBreaker && typeof state.circuitBreaker === 'object') {
+      this.circuitBreaker = {
+        ...this.circuitBreaker,
+        ...state.circuitBreaker
+      };
+    }
+
+    return { success: true };
+  }
 
   // ============================================================
-  // Circuit Breaker — protects against cascading SMTP failures
-  // States: closed (normal) → open (failing) → half-open (probe)
+  // Circuit Breaker -- protects against cascading SMTP failures
+  // States: closed (normal) -> open (failing) -> half-open (probe)
   // ============================================================
 
   _circuitCheck() {
@@ -934,9 +1051,10 @@ class EmailService {
     cb.lastFailure = Date.now();
     if (cb.state === 'half-open' || cb.failures >= cb.threshold) {
       cb.state = 'open';
-      // Exponential backoff capped at 10 minutes
+      // Exponential backoff capped at 10 minutes.
+      // trips starts at 1 on the first opening so backoff increases immediately.
       const trips = Math.floor(cb.failures / cb.threshold);
-      cb.timeout = Math.min(cb.baseTimeout * Math.pow(2, trips - 1), 10 * 60 * 1000);
+      cb.timeout = Math.min(cb.baseTimeout * Math.pow(2, trips), 10 * 60 * 1000);
     }
   }
 

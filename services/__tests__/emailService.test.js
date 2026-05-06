@@ -4,11 +4,14 @@ describe('EmailService', () => {
   let emailService;
 
   beforeEach(() => {
+    jest.useFakeTimers();
     emailService = new EmailService(null, 'test-secret');
   });
 
   afterEach(() => {
     emailService?.dispose();
+    jest.runOnlyPendingTimers();
+    jest.useRealTimers();
   });
 
   it('should generate valid HMAC tokens', () => {
@@ -69,6 +72,13 @@ describe('EmailService', () => {
 
     expect(html).toContain('mailto:sender@example.com?subject=Unsubscribe');
     expect(html).not.toContain('{{unsubscribeLink}}');
+  });
+
+  it('should suppress tracking links for private network tracking hosts', () => {
+    emailService.setTrackingBaseUrl('http://192.168.1.20:3847');
+
+    expect(emailService.createUnsubscribeUrl('campaign-1', 'contact-1', 'test@example.com')).toBeNull();
+    expect(emailService.addOpenTracking('<p>Hello</p>', 'track-1', 'campaign-1', 'contact-1')).toBe('<p>Hello</p>');
   });
 
   it('should stop a campaign when all active SMTP accounts hit their daily limit', async () => {
@@ -132,5 +142,47 @@ describe('EmailService', () => {
     }));
     expect(result.status).toBe('stopped');
     expect(result.failed).toBe(1);
+  });
+
+  it('should interrupt pending waits when the service is stopped', async () => {
+    const waitPromise = emailService.sleep(60000);
+
+    emailService.stop();
+    jest.advanceTimersByTime(1);
+    await waitPromise;
+
+    expect(emailService._pendingWaits.size).toBe(0);
+    expect(emailService.isStopped).toBe(true);
+  });
+
+  it('should expose and restore state for service recovery', () => {
+    emailService.isPaused = true;
+    emailService.currentCampaignId = 'campaign-1';
+    emailService.currentSmtpIndex = 2;
+    emailService.setTrackingBaseUrl('https://track.example.com');
+    emailService.sendingMode = 'personal';
+    emailService.companyAddress = '12 Example Street';
+    emailService.circuitBreaker.state = 'open';
+    emailService.circuitBreaker.failures = 3;
+
+    const saved = emailService.getState();
+
+    const restored = new EmailService(null, 'test-secret');
+    restored.setState(saved);
+
+    expect(restored.getState()).toMatchObject({
+      isPaused: true,
+      currentCampaignId: 'campaign-1',
+      currentSmtpIndex: 2,
+      trackingBaseUrl: 'https://track.example.com',
+      sendingMode: 'personal',
+      companyAddress: '12 Example Street',
+      circuitBreaker: expect.objectContaining({
+        state: 'open',
+        failures: 3
+      })
+    });
+
+    restored.dispose();
   });
 });

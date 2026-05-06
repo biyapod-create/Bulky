@@ -1,0 +1,1213 @@
+/* Dashboard, campaigns, KPI, donut, and legacy renovation passes */
+
+/* ============================================================
+   BEHANCE-INSPIRED RENOVATION LAYER
+   ============================================================ */
+
+
+
+
+
+
+
+
+.title-bar-pill {
+  min-height: 28px;
+  background: linear-gradient(135deg, rgba(91, 180, 212, 0.16), rgba(16, 185, 129, 0.14));
+  border-color: rgba(91, 180, 212, 0.2);
+}
+
+
+
+.title-bar-version {
+  opacity: 0.5;
+  font-weight: 500;
+}
+
+
+
+
+
+
+
+
+
+.sidebar-brand-mark {
+  width: 42px;
+  height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--accent);
+}
+
+.sidebar-brand-copy {
+  min-width: 0;
+}
+
+.sidebar-brand-title {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+
+.sidebar-brand-meta {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+.sidebar-ai-toggle-off {
+  width: calc(100% - 20px);
+  margin: 0 10px 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+
+
+.main-content-inner {
+  max-width: 1640px;
+  margin: 0 auto;
+}
+
+.page-shell {
+  min-height: 100%;
+}
+
+.page-shell-dashboard {
+  display: grid;
+  gap: var(--space-5);
+}
+
+.dashboard-page-intro {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(260px, 0.85fr);
+  gap: var(--gap-cards);
+  align-items: stretch;
+}
+
+.dashboard-hero-card,
+.dashboard-side-rail,
+.dashboard-panel,
+.dashboard-table-card {
+  position: relative;
+  overflow: hidden;
+  background:
+    var(--surface-glass),
+    var(--bg-secondary);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-soft);
+}
+
+.dashboard-hero-card::after,
+.dashboard-side-rail::after {
+  content: '';
+  position: absolute;
+  inset: auto -70px -70px auto;
+  width: 180px;
+  height: 180px;
+  border-radius: 999px;
+  background: rgba(91, 180, 212, 0.08);
+  filter: blur(8px);
+  pointer-events: none;
+}
+
+.dashboard-hero-card {
+  padding: clamp(22px, 2.6vw, 32px);
+  border-radius: 28px;
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+}
+
+.dashboard-side-rail {
+  padding: clamp(18px, 2vw, 24px);
+  border-radius: 24px;
+  display: grid;
+  gap: 14px;
+}
+
+.dashboard-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(91, 180, 212, 0.12);
+  border: 1px solid rgba(91, 180, 212, 0.18);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.dashboard-hero-title {
+  font-size: clamp(30px, 4.2vw, 44px);
+  line-height: 1.04;
+  letter-spacing: -0.04em;
+  max-width: 12ch;
+}
+
+.dashboard-hero-copy {
+  max-width: 60ch;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.dashboard-hero-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.dashboard-mini-stat {
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.dashboard-mini-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.dashboard-mini-value {
+  margin-top: 8px;
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.dashboard-mini-copy {
+  margin-top: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.dashboard-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(var(--grid-min-card), 100%), 1fr));
+  gap: var(--gap-cards);
+  grid-auto-flow: dense;
+}
+
+.dashboard-grid--compact {
+  --grid-min-card: 180px;
+}
+
+.dashboard-grid--wide {
+  --grid-min-card: 280px;
+}
+
+.dashboard-kpi-card {
+  min-height: 100%;
+  padding: 18px;
+  border-radius: 22px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent),
+    rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-soft);
+  display: grid;
+  gap: 12px;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+
+.dashboard-kpi-card.is-clickable {
+  cursor: pointer;
+}
+
+
+
+.dashboard-kpi-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+
+
+.dashboard-kpi-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+
+
+.dashboard-kpi-note,
+.dashboard-kpi-foot {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+
+
+.dashboard-section-card {
+  border-radius: 24px;
+  padding: clamp(18px, 2vw, 24px);
+}
+
+.dashboard-section-card.is-prominent {
+  box-shadow: var(--shadow-glow);
+}
+
+.dashboard-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.dashboard-section-copy {
+  max-width: 56ch;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+}
+
+.dashboard-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.dashboard-rail-metric {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.dashboard-score-ring {
+  width: clamp(132px, 14vw, 154px);
+  height: clamp(132px, 14vw, 154px);
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 10px auto 0;
+}
+
+.dashboard-score-inner {
+  width: calc(100% - 18px);
+  height: calc(100% - 18px);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.5);
+  display: grid;
+  place-items: center;
+  text-align: center;
+}
+
+.dashboard-activity-list,
+.dashboard-health-list,
+.dashboard-tip-list {
+  display: grid;
+  gap: 12px;
+}
+
+.dashboard-activity-item,
+.dashboard-health-item,
+.dashboard-tip-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.dashboard-activity-icon,
+.dashboard-health-icon {
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.dashboard-item-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.dashboard-item-subtitle,
+.dashboard-item-meta {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.dashboard-campaign-table .table-container {
+  margin: 0;
+  padding: 0;
+}
+
+.dashboard-empty {
+  padding: 34px 18px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px dashed rgba(255, 255, 255, 0.08);
+  text-align: center;
+}
+
+.dashboard-tip-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.dashboard-tip-card {
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+@media (max-width: 1400px) {
+  .dashboard-page-intro {
+    grid-template-columns: 1fr;
+  }
+}
+
+
+
+@media (max-width: 900px) {
+  
+
+  .sidebar-brand-copy {
+    display: none;
+  }
+}
+
+@media (max-width: 768px) {
+  .dashboard-hero-card,
+  .dashboard-side-rail,
+  .dashboard-section-card {
+    border-radius: 22px;
+  }
+
+  .dashboard-kpi-card {
+    padding: 16px;
+  }
+
+  .dashboard-activity-item,
+  .dashboard-health-item,
+  .dashboard-tip-item {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .dashboard-item-meta {
+    grid-column: 2;
+  }
+}
+
+
+/* ================================================================
+   BEHANCE PHASE 2 â€” KPI Cards: gradient icon circles, trend pills
+   ================================================================ */
+
+/* Gradient icon circles for KPI cards â€” replaces flat bg */
+
+
+/* Trend pill â€” up=green, down=red, neutral=muted */
+
+.dashboard-kpi-trend.up {
+  background: rgba(34, 197, 94, 0.12);
+  color: var(--success);
+  border: 1px solid rgba(34, 197, 94, 0.18);
+}
+.dashboard-kpi-trend.down {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--error);
+  border: 1px solid rgba(239, 68, 68, 0.18);
+}
+.dashboard-kpi-trend.neutral {
+  background: rgba(255,255,255,0.045);
+  color: var(--text-muted);
+  border: 1px solid rgba(255,255,255,0.06);
+}
+
+/* KPI value â€” animated number counter utility */
+@keyframes kpiCount {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+
+/* ================================================================
+   BEHANCE PHASE 3 â€” Campaign rows: progress bars + status avatars
+   ================================================================ */
+
+/* Campaign row card layout â€” replaces plain table row */
+.campaign-row-card {
+  display: grid;
+  grid-template-columns: auto minmax(0,1fr) auto auto auto;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01)),
+    var(--bg-secondary);
+  border: 1px solid rgba(255,255,255,0.065);
+  transition: background 0.18s, border-color 0.18s, transform 0.18s, box-shadow 0.18s;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+}
+.campaign-row-card + .campaign-row-card {
+  margin-top: 8px;
+}
+.campaign-row-main {
+  min-width: 0;
+}
+
+.campaign-row-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  min-width: 0;
+}
+
+.campaign-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* Status avatar circle */
+.campaign-row-avatar {
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.campaign-row-avatar.draft     { background: rgba(113,113,122,0.15); color: var(--text-muted); }
+.campaign-row-avatar.scheduled { background: rgba(245,158,11,0.12);  color: var(--warning); }
+.campaign-row-avatar.running   { background: rgba(34,197,94,0.12);   color: var(--success); }
+.campaign-row-avatar.completed { background: rgba(124,58,237,0.12);  color: var(--accent); }
+.campaign-row-avatar.paused    { background: rgba(245,158,11,0.12);  color: var(--warning); }
+.campaign-row-avatar.failed    { background: rgba(239,68,68,0.12);   color: var(--error); }
+
+/* Progress bar inside campaign row */
+.campaign-row-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.06);
+  overflow: hidden;
+  margin-top: 6px;
+}
+.campaign-row-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.5s cubic-bezier(0.4,0,0.2,1);
+}
+.campaign-row-progress-fill.completed { background: var(--success); }
+.campaign-row-progress-fill.failed    { background: var(--error); }
+
+/* Rate badge pill */
+.campaign-row-rate {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(34,197,94,0.1);
+  color: var(--success);
+  white-space: nowrap;
+}
+.campaign-row-rate.zero {
+  background: rgba(113,113,122,0.1);
+  color: var(--text-muted);
+}
+
+.campaign-row-status {
+  min-width: 124px;
+  text-align: right;
+}
+
+.campaign-row-metrics {
+  min-width: 140px;
+  text-align: right;
+}
+
+.campaign-row-metric-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.campaign-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 180px;
+}
+
+/* Campaign rows list container */
+.campaign-rows-list {
+  display: grid;
+  gap: 8px;
+}
+
+/* ================================================================
+   BEHANCE PHASE 4 â€” Chart: period selector tabs
+   ================================================================ */
+
+.chart-period-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.chart-period-tabs {
+  display: flex;
+  gap: 4px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 10px;
+  padding: 3px;
+}
+
+.chart-period-tab {
+  padding: 5px 12px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  transition: background 0.15s, color 0.15s;
+}
+.chart-period-tab:hover {
+  color: var(--text-primary);
+  background: rgba(255,255,255,0.04);
+}
+.chart-period-tab.active {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+}
+
+/* ================================================================
+   BEHANCE PHASE 5 â€” Glassmorphism on all .card elements
+   ================================================================ */
+
+
+/* ================================================================
+   BEHANCE PHASE 6 â€” Sidebar: version pill, divider polish
+   ================================================================ */
+
+/* Version pill under the brand block */
+
+
+/* Section label â€” more visible separator line */
+
+.sidebar-group + .sidebar-group::before {
+  content: '';
+  display: block;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.08), transparent);
+  margin: 4px 14px 12px;
+}
+
+/* Workspace chip above sidebar nav */
+
+.sidebar-workspace-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+  flex-shrink: 0;
+}
+.sidebar-workspace-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sidebar-workspace-badge {
+  margin-left: auto;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(34,197,94,0.12);
+  color: var(--success);
+  flex-shrink: 0;
+}
+
+/* ================================================================
+   BEHANCE â€” Donut chart (delivery breakdown widget)
+   ================================================================ */
+
+.donut-chart-wrap {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 4px 0;
+}
+.donut-chart-wrap svg {
+  flex-shrink: 0;
+}
+.donut-legend {
+  display: grid;
+  gap: 8px;
+}
+.donut-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.donut-legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.donut-legend-label {
+  color: var(--text-secondary);
+  flex: 1;
+}
+.donut-legend-value {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+/* ================================================================
+   BEHANCE â€” Notification bell badge polish
+   ================================================================ */
+
+
+
+/* ================================================================
+   BEHANCE â€” Gradient CTA button variant
+   ================================================================ */
+
+/* ================================================================
+   BEHANCE â€” Activity feed item micro-animation
+   ================================================================ */
+
+@keyframes activityFeedIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.dashboard-activity-item {
+  animation: activityFeedIn 0.3s ease both;
+}
+.dashboard-activity-item:nth-child(1)  { animation-delay: 0.03s; }
+.dashboard-activity-item:nth-child(2)  { animation-delay: 0.06s; }
+.dashboard-activity-item:nth-child(3)  { animation-delay: 0.09s; }
+.dashboard-activity-item:nth-child(4)  { animation-delay: 0.12s; }
+.dashboard-activity-item:nth-child(5)  { animation-delay: 0.15s; }
+
+/* ================================================================
+   BEHANCE â€” Responsive additions
+   ================================================================ */
+
+@media (max-width: 1400px) {
+  .chart-period-row { flex-direction: column; align-items: flex-start; }
+}
+@media (max-width: 768px) {
+  .campaign-row-card {
+    grid-template-columns: auto minmax(0,1fr);
+  }
+  .campaign-row-status,
+  .campaign-row-metrics,
+  .campaign-row-actions {
+    grid-column: 2;
+    text-align: left;
+    justify-content: flex-start;
+    min-width: 0;
+  }
+  .campaign-row-actions {
+    margin-top: 4px;
+  }
+  .donut-chart-wrap { flex-direction: column; }
+}
+@media (max-width: 480px) {
+  .chart-period-tabs { width: 100%; justify-content: stretch; }
+  .chart-period-tab  { flex: 1; text-align: center; }
+}
+
+
+/* Stat card trend pill â€” â†‘/â†“ vs last period */
+.stat-trend-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  margin-top: 5px;
+}
+
+.stat-trend-pill.up {
+  background: rgba(34, 197, 94, 0.12);
+  color: var(--success);
+  border: 1px solid rgba(34, 197, 94, 0.2);
+}
+
+.stat-trend-pill.down {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--error);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+.stat-trend-pill.flat {
+  background: rgba(113, 113, 122, 0.12);
+  color: var(--text-muted);
+  border: 1px solid rgba(113, 113, 122, 0.18);
+}
+
+/* Counter animation */
+@keyframes countUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0);   }
+}
+
+.stat-value {
+  animation: countUp 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+/* â”€â”€ Responsive grids for new Dashboard KPI rows â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+@media (max-width: 1400px) {
+  /* 4-col -> 2-col */
+  [style*="repeat(4, minmax(0,1fr))"] { grid-template-columns: repeat(2, minmax(0,1fr)); }
+  /* 5-col -> 3-col */
+  [style*="repeat(5, minmax(0,1fr))"] { grid-template-columns: repeat(3, minmax(0,1fr)); }
+}
+@media (max-width: 1100px) {
+  [style*="repeat(4, minmax(0,1fr))"] { grid-template-columns: repeat(2, minmax(0,1fr)); }
+  [style*="repeat(5, minmax(0,1fr))"] { grid-template-columns: repeat(2, minmax(0,1fr)); }
+  /* campaign+activity side by side -> stack */
+  [style*="1.6fr) minmax(0,1fr)"]    { grid-template-columns: 1fr; }
+  [style*="minmax(0,1fr) minmax(0,1fr)"] { grid-template-columns: 1fr; }
+}
+@media (max-width: 768px) {
+  [style*="repeat(4, minmax(0,1fr))"] { grid-template-columns: 1fr 1fr; }
+  [style*="repeat(5, minmax(0,1fr))"] { grid-template-columns: 1fr 1fr; }
+}
+
+/* spin animation for refresh button */
+@keyframes spin {
+  from { transform: rotate(0deg);   }
+  to   { transform: rotate(360deg); }
+}
+
+/* cursor-pointer utility */
+.cursor-pointer { cursor: pointer; }
+
+/* â”€â”€ Fix any remaining purple accent references â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+
+
+/* â”€â”€â”€ Animation utilities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0);    }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.page-fade-in {
+  animation: fadeInUp 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.hover-lift {
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+.hover-lift:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+}
+
+/* â”€â”€â”€ RealtimeLineChart live pulse dot â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+
+@keyframes livePulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.5; transform: scale(1.4); }
+}
+
+.line-chart-live-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  animation: livePulse 1.8s ease-in-out infinite;
+  display: inline-block;
+}
+
+/* â”€â”€â”€ Guide page classes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+
+.guide-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 12px;
+}
+
+.guide-hero-card {
+  border-radius: 20px;
+  padding: 32px 36px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+}
+
+.guide-hero-copy {
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-top: 8px;
+  max-width: 600px;
+}
+
+.guide-hero-stats {
+  display: flex;
+  gap: 32px;
+  margin-top: 20px;
+  flex-wrap: wrap;
+}
+
+.guide-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.guide-stat-value {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.03em;
+}
+
+.guide-stat-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.guide-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 16px;
+}
+
+.guide-card {
+  padding: 20px;
+  border-radius: 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  transition: border-color 0.15s, transform 0.15s;
+}
+
+.guide-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+}
+
+.guide-card-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-dim);
+  color: var(--accent);
+  margin-bottom: 12px;
+}
+
+.guide-function-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
+}
+
+.guide-function-card {
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.guide-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.guide-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.guide-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+/* â”€â”€â”€ Settings guide link cards â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+
+.guide-link-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  text-decoration: none;
+}
+
+.guide-link-card:hover {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+
+.guide-link-kicker {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 2px;
+}
+
+/* â”€â”€â”€ Dashboard page shell â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+
+.page-shell-dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.dashboard-page-intro {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 20px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .dashboard-page-intro {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* â”€â”€â”€ EngagementDashboard classes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+
+.engagement-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.engagement-tier-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+}
+
+.engagement-tier-label {
+  font-size: 12px;
+  font-weight: 600;
+  min-width: 80px;
+  color: var(--text-secondary);
+}
+
+.engagement-bar-track {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+.engagement-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.engagement-bar-count {
+  font-size: 12px;
+  font-weight: 600;
+  min-width: 40px;
+  text-align: right;
+  color: var(--text-primary);
+}
+
+
+/* ================================================================
+   UI POLISH PASS â€” remove card box-shadows, tighten KPI grids
+   ================================================================ */
+
+/* 1. Strip elevation shadows from all dashboard cards â€” clean flat look */
+.dashboard-kpi-card,
+.dashboard-hero-card,
+.dashboard-side-rail,
+.dashboard-panel,
+.dashboard-table-card,
+.dashboard-section-card {
+  box-shadow: none;
+}
+
+/* Keep hover interaction but no shadow â€” use border glow instead */
+
+
+/* 3. Strip shadow from sidebar brand block */
+
+
+/* 4. Strip shadow from automation/drip/form active cards */
+.automation-card.active {
+  box-shadow: none;
+}
+
+/* 5. Strip shadow from toast â€” keep the border instead */
+.toast {
+  box-shadow: none;
+}
+
+/* 6. Strip notification panel shadow */
+.notification-center-panel {
+  box-shadow: none;
+}
+
+/* 7. Strip tooltip shadow â€” use border */
+.line-chart-tooltip {
+  box-shadow: none;
+}
+
+/* ================================================================
+   TIGHT KPI GRID â€” remove blank space, cards fill available width
+   ================================================================ */
+
+/* 4-column KPI row: tighter gap, no wasted space */
+.stats-grid-4,
+div[style*="repeat(4, minmax(0,1fr))"] {
+  gap: 10px;
+}
+
+/* 5-column KPI row: same */
+.stats-grid-5,
+div[style*="repeat(5, minmax(0,1fr))"] {
+  gap: 10px;
+}
+
+
+/* KPI card â€” tighter internal padding on compact screens */
+@media (max-width: 1400px) {
+  /* Remove min-height floor so cards don't balloon */
+  .dashboard-kpi-card {
+    min-height: unset;
+  }
+}
+
+/* ================================================================
+   SECTION LABEL â€” uppercase + muted, visually distinct from items
+   ================================================================ */
+

@@ -1,0 +1,376 @@
+/* Automations, drip sequences, signup forms, and modal sizing */
+
+/* ==================== AUTOMATIONS PAGE ==================== */
+.page-container {
+  padding: var(--page-y) var(--page-x);
+  width: 100%;
+  max-width: min(100%, 1560px);
+  margin: 0 auto;
+  display: grid;
+  gap: var(--space-5);
+}
+
+.page-container .page-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: 0;
+}
+
+.page-container .page-header h1 {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+}
+
+.page-container .page-header .subtitle,
+.page-container .subtitle {
+  color: var(--text-secondary);
+  font-size: 14px;
+  margin: 4px 0 0 0;
+}
+
+.page-container > .empty-state {
+  width: 100%;
+  max-width: none;
+  min-height: 360px;
+}
+
+/* Status badge â€” used in automation/drip/form pages */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: capitalize;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+.status-badge.active { background: rgba(34,197,94,0.15); color: var(--success); border-color: rgba(34,197,94,0.25); }
+.status-badge.draft  { background: var(--bg-tertiary); color: var(--text-muted); }
+.status-badge.inactive { background: rgba(245,158,11,0.1); color: var(--warning); border-color: rgba(245,158,11,0.2); }
+.status-badge.error  { background: rgba(239,68,68,0.15); color: var(--error); border-color: rgba(239,68,68,0.2); }
+
+/* btn-icon danger variant */
+.btn-icon.danger { color: var(--text-muted); }
+.btn-icon.danger:hover { background: rgba(239,68,68,0.12); color: var(--error); }
+
+/* form-hint â€” small helper text under form fields */
+.form-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  line-height: 1.5;
+}
+
+.automation-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--gap-cards);
+  align-items: stretch;
+}
+
+.automation-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 1.25rem;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.automation-card:hover {
+  border-color: rgba(91,180,212,0.3);
+}
+
+.automation-card.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-dim);
+}
+
+.automation-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.automation-icon {
+  font-size: 1.5rem;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+}
+
+.automation-info h3 {
+  margin: 0 0 0.25rem 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.automation-trigger {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.automation-description {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin: 0 0 1rem 0;
+  line-height: 1.5;
+}
+
+.automation-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.automation-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* ==================== DRIP SEQUENCES PAGE ==================== */
+.drip-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.drip-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 1.25rem;
+  transition: border-color 0.2s ease;
+}
+
+.drip-card.active {
+  border-color: var(--accent);
+}
+
+.drip-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 0.75rem;
+}
+
+.drip-info h3 {
+  margin: 0 0 0.25rem 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.drip-campaign {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.drip-stats {
+  text-align: right;
+}
+
+.step-count {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+}
+
+.drip-description {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin: 0 0 1rem 0;
+}
+
+.drip-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.drip-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.steps-container {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.step-item {
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  padding: 1rem;
+}
+
+.step-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.step-number {
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.step-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.step-delay {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.step-delay input {
+  width: 80px;
+}
+
+.step-delay select {
+  width: 120px;
+}
+
+/* ==================== SIGNUP FORMS PAGE ==================== */
+.form-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--gap-cards);
+  align-items: stretch;
+}
+
+.form-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 1.25rem;
+  transition: border-color 0.2s ease;
+}
+
+.form-card.active {
+  border-color: var(--accent);
+}
+
+.form-header {
+  margin-bottom: 0.75rem;
+}
+
+.form-info h3 {
+  margin: 0 0 0.25rem 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.form-list-target {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.form-fields-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.field-tag {
+  font-size: 0.75rem;
+  background: var(--bg-tertiary);
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  color: var(--text-secondary);
+}
+
+.form-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.form-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.fields-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.field-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.625rem;
+  align-items: flex-start;
+}
+
+.field-row > * {
+  min-width: 0;
+}
+
+.field-row .form-input {
+  flex: 1 1 180px;
+}
+
+.field-row input[type="text"] {
+  flex: 1 1 180px;
+}
+
+.field-row select {
+  width: 120px;
+  flex: 0 0 120px;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.embed-code {
+  font-family: monospace;
+  font-size: 0.8rem;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 0.75rem;
+  width: 100%;
+  resize: vertical;
+}
+
+/* ==================== MODAL SIZES ==================== */
+.modal-lg {
+  max-width: 700px;
+  width: 90%;
+}

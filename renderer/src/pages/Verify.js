@@ -70,12 +70,31 @@ function Verify({ isActive }) {
     }
   };
 
+  const isDeepVerification = verificationDepth === 'deep';
+  const verificationModeLabel = isDeepVerification ? 'Deep mailbox checks' : 'Fast DNS checks';
+
   const resetVerificationState = useCallback(() => {
     verifyingRef.current = false;
     setIsVerifying(false);
     setIsPaused(false);
     setProgress(null);
   }, []);
+
+  const buildVerificationRequest = useCallback((emailOrEmails) => {
+    if (isDeepVerification) {
+      return {
+        email: Array.isArray(emailOrEmails) ? undefined : emailOrEmails,
+        emails: Array.isArray(emailOrEmails) ? emailOrEmails : undefined,
+        smtpCheck: true,
+        timeout: 7000,
+        checkCatchAll: false
+      };
+    }
+
+    return Array.isArray(emailOrEmails)
+      ? { emails: emailOrEmails, smtpCheck: false }
+      : { email: emailOrEmails, smtpCheck: false };
+  }, [isDeepVerification]);
 
   const handleSingleVerify = async () => {
     if (!singleEmail) {
@@ -108,7 +127,7 @@ function Verify({ isActive }) {
     setVerifySteps(prev => prev.map(s => ({ ...s, status: 'done' })));
 
     try {
-      const result = await window.electron.verify.email(singleEmail, { smtpCheck: isDeepVerification });
+      const result = await window.electron.verify.email(buildVerificationRequest(singleEmail));
       if (result && result.error) {
         addToast(result.error, 'error');
         setVerifySteps([]);
@@ -137,7 +156,7 @@ function Verify({ isActive }) {
     setIsPaused(false);
     setProgress({ current: 0, total: emails.length });
     try {
-      const result = await window.electron.verify.bulk(emails, { smtpCheck: isDeepVerification });
+      const result = await window.electron.verify.bulk(buildVerificationRequest(emails));
       if (result && result.error) {
         addToast(result.error, 'error');
       } else {
@@ -176,7 +195,7 @@ function Verify({ isActive }) {
     setProgress({ current: 0, total: emails.length });
 
     try {
-      const result = await window.electron.verify.bulk(emails, { smtpCheck: isDeepVerification });
+      const result = await window.electron.verify.bulk(buildVerificationRequest(emails));
       if (result?.error) {
         addToast(result.error, 'error');
         return;
@@ -319,8 +338,6 @@ function Verify({ isActive }) {
 
   const unverifiedCount = contacts.filter(c => !c.verificationStatus || c.verificationStatus === 'unverified').length;
   const progressPercent = progress ? Math.round((progress.current / Math.max(progress.total, 1)) * 100) : 0;
-  const isDeepVerification = verificationDepth === 'deep';
-  const verificationModeLabel = isDeepVerification ? 'Deep mailbox checks' : 'Fast DNS checks';
 
   return (
     <div>

@@ -1,0 +1,7 @@
+/* Bulky feature stylesheet entrypoint: preserve section order for stable overrides */
+@import './features/assistant.css';
+@import './features/automation.css';
+@import './features/auth.css';
+@import './features/charts.css';
+@import './features/dashboard.css';
+@import './features/shell-pages.css';

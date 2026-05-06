@@ -4,7 +4,7 @@ Professional bulk email software for desktop use, with local data ownership, SMT
 
 ## Current Release
 
-- Version: `6.0.4`
+- Version: `6.1.0`
 - Platform: Windows desktop app
 - Installer: available from the GitHub Releases page
 
@@ -47,13 +47,32 @@ npm run smoke:packaged
 Bulky/
 |-- main.js
 |-- preload.js
+|-- docs/
 |-- database/
 |-- ipc/
 |-- renderer/
 |-- scripts/
 |-- services/
+|-- tools/
 `-- assets/
 ```
+
+## Code Ownership
+
+- `main.js`: Electron lifecycle, tracking HTTP server, service bootstrap, IPC registration
+- `preload.js`: renderer-safe bridge for all privileged capabilities
+- `database/`: sql.js storage layer and feature repositories
+- `ipc/`: feature-based IPC registration modules and validation
+- `services/`: sending, tracking, verification, spam, AI, service lifecycle
+- `renderer/src/pages/`: page-level workflows
+- `renderer/src/components/`: reusable UI and desktop shell
+- `renderer/src/utils/`: client-side view-model, content-readiness, and deliverability helpers
+
+## Documentation And Maintenance
+
+- Architecture and production planning docs now live under [`docs/`](./docs)
+- One-off maintenance helpers and CSS cleanup tooling now live under [`tools/`](./tools)
+- Active release/smoke scripts remain under [`scripts/`](./scripts)
 
 ## Runtime Note
 

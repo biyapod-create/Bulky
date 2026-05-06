@@ -1,22 +1,164 @@
-Bulky Email Sender
-Copyright (c) 2024 AllenRetro
+BULKY EMAIL SENDER — END USER LICENSE AGREEMENT (EULA)
+Version 6.1.0 | Effective Date: 2025
+Copyright (c) 2025 AllenRetro. All rights reserved.
+================================================================
 
-MIT License
+PLEASE READ THIS AGREEMENT CAREFULLY BEFORE INSTALLING OR USING
+BULKY EMAIL SENDER ("THE SOFTWARE"). BY CLICKING "I AGREE",
+INSTALLING, OR USING THE SOFTWARE YOU ACCEPT ALL TERMS BELOW.
+IF YOU DO NOT AGREE, DO NOT INSTALL OR USE THE SOFTWARE.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+----------------------------------------------------------------
+1. GRANT OF LICENSE
+----------------------------------------------------------------
+AllenRetro grants you a personal, non-exclusive, non-transferable,
+revocable license to install and use one (1) copy of Bulky Email
+Sender on computers you own or control, solely for your personal
+or internal business purposes.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+----------------------------------------------------------------
+2. PERMITTED USES
+----------------------------------------------------------------
+You may:
+  a) Install and run the Software on your own machines.
+  b) Make one (1) backup copy for archival purposes.
+  c) Use the Software to send email campaigns to recipients who
+     have given you explicit, verifiable consent (opt-in).
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+----------------------------------------------------------------
+3. RESTRICTIONS
+----------------------------------------------------------------
+You may NOT:
+  a) Redistribute, resell, rent, lease, or sublicense the Software.
+  b) Reverse-engineer, decompile, or disassemble the Software.
+  c) Use the Software to send unsolicited bulk email (spam).
+  d) Use the Software to harass, defraud, or harm any person.
+  e) Remove or alter any copyright, trademark, or legal notices.
+  f) Use the Software in violation of any applicable law or
+     regulation, including but not limited to CAN-SPAM, GDPR,
+     CASL, and applicable anti-spam laws in your jurisdiction.
+
+----------------------------------------------------------------
+4. RESPONSIBLE USE & ANTI-SPAM POLICY
+----------------------------------------------------------------
+The Software is provided for LEGITIMATE email marketing only.
+You are solely responsible for:
+  - Obtaining lawful consent from all recipients before sending.
+  - Honouring unsubscribe requests promptly (within 10 business days).
+  - Maintaining accurate sender identification in all messages.
+  - Complying with all applicable email and privacy laws.
+
+AllenRetro expressly prohibits use of this Software for spam,
+phishing, malware distribution, or any other abusive purpose.
+Violation of this policy may result in permanent revocation of
+your license with no refund.
+
+----------------------------------------------------------------
+5. INTELLECTUAL PROPERTY
+----------------------------------------------------------------
+The Software, including its source code, design, graphics, and
+documentation, is the intellectual property of AllenRetro and is
+protected by copyright law and international treaties. This EULA
+does not transfer any ownership rights to you.
+
+----------------------------------------------------------------
+6. UPDATES & VERSIONING
+----------------------------------------------------------------
+AllenRetro may release updates, patches, or new versions of the
+Software. Updates delivered through the built-in update mechanism
+are subject to this EULA. You are encouraged to keep the Software
+up to date. AllenRetro is not obligated to provide updates.
+
+----------------------------------------------------------------
+7. PRIVACY & DATA
+----------------------------------------------------------------
+The Software operates entirely on your local machine. AllenRetro
+does not collect personal data from your contacts or email
+campaigns. Crash reports and anonymous usage telemetry may be
+collected to improve the Software; you may disable telemetry in
+Settings at any time.
+
+----------------------------------------------------------------
+8. DISCLAIMER OF WARRANTIES
+----------------------------------------------------------------
+THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
+NON-INFRINGEMENT. ALLENRETRO DOES NOT WARRANT THAT THE SOFTWARE
+WILL BE ERROR-FREE OR UNINTERRUPTED.
+
+----------------------------------------------------------------
+9. LIMITATION OF LIABILITY
+----------------------------------------------------------------
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, IN NO EVENT SHALL
+ALLENRETRO BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL,
+CONSEQUENTIAL, OR PUNITIVE DAMAGES ARISING OUT OF OR RELATED TO
+YOUR USE OF THE SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGES. ALLENRETRO'S TOTAL LIABILITY SHALL NOT EXCEED THE
+AMOUNT YOU PAID FOR THE SOFTWARE (IF ANY).
+
+----------------------------------------------------------------
+10. INDEMNIFICATION
+----------------------------------------------------------------
+You agree to indemnify and hold harmless AllenRetro and its
+affiliates from any claims, damages, losses, or expenses
+(including reasonable legal fees) arising from your use of the
+Software or your violation of this EULA or applicable law.
+
+----------------------------------------------------------------
+11. TERMINATION
+----------------------------------------------------------------
+This license is effective until terminated. It terminates
+automatically if you breach any term of this EULA. Upon
+termination you must destroy all copies of the Software in your
+possession.
+
+----------------------------------------------------------------
+12. GOVERNING LAW
+----------------------------------------------------------------
+This EULA shall be governed by and construed in accordance with
+applicable law. Any disputes shall be resolved in a court of
+competent jurisdiction. If any provision of this EULA is found
+unenforceable, the remaining provisions shall continue in full
+force and effect.
+
+----------------------------------------------------------------
+13. ENTIRE AGREEMENT
+----------------------------------------------------------------
+This EULA constitutes the entire agreement between you and
+AllenRetro regarding the Software and supersedes all prior
+understandings, representations, or warranties.
+
+----------------------------------------------------------------
+CONTACT
+----------------------------------------------------------------
+AllenRetro | Bulky Email Sender
+For support and inquiries visit the project repository.
+
+By installing Bulky Email Sender v6.1.0 you acknowledge that
+you have read, understood, and agreed to all terms above.
+
+================================================================
+MIT License (underlying open-source components)
+================================================================
+
+Permission is hereby granted, free of charge, to any person
+obtaining a copy of this software and associated documentation
+files (the "Software"), to deal in the Software without
+restriction, including without limitation the rights to use,
+copy, modify, merge, publish, distribute, sublicense, and/or
+sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.

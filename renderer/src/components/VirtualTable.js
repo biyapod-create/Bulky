@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 
 /**
- * Lightweight virtual scroll table — only renders visible rows.
+ * Lightweight virtual scroll table -- only renders visible rows.
  * Props:
  *  - items: array of data
  *  - rowHeight: pixel height per row (default 44)
@@ -14,7 +14,6 @@ function VirtualTable({ items, rowHeight = 44, maxHeight = 500, renderHeader, re
   const containerRef = useRef(null);
   const [scrollTop, setScrollTop] = useState(0);
 
-  const totalHeight = items.length * rowHeight;
   const visibleCount = Math.ceil(maxHeight / rowHeight);
   const startIndex = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan);
   const endIndex = Math.min(items.length, startIndex + visibleCount + overscan * 2);

@@ -6,12 +6,46 @@ function registerSmtpHandlers({
   emailService,
   decryptSmtpAccount,
   encryptPassword,
+  entitlementService,
   validateRequired,
   getPrimarySmtpAccount
 }) {
-  safeHandler('smtpAccounts:getAll', () => db.getAllSmtpAccounts().map(decryptSmtpAccount));
-  safeHandler('smtpAccounts:getActive', () => db.getActiveSmtpAccounts().map(decryptSmtpAccount));
+  const sanitizeAccountForRenderer = (account) => {
+    if (!account) return account;
+    return {
+      ...account,
+      password: '',
+      hasStoredPassword: !!account.password
+    };
+  };
+
+  const resolveStoredPassword = (account, existingAccount = null) => {
+    if ((account?.password || '').trim()) {
+      return account;
+    }
+    if (!existingAccount?.password) {
+      return account;
+    }
+
+    const decryptedExisting = decryptSmtpAccount(existingAccount);
+    return {
+      ...account,
+      password: decryptedExisting.password || ''
+    };
+  };
+
+  safeHandler('smtpAccounts:getAll', () => db.getAllSmtpAccounts().map(sanitizeAccountForRenderer));
+  safeHandler('smtpAccounts:getActive', () => db.getActiveSmtpAccounts().map(sanitizeAccountForRenderer));
   safeHandler('smtpAccounts:add', (e, account) => {
+    const limitCheck = entitlementService?.canAddSmtpAccount?.(db.getAllSmtpAccounts().length);
+    if (limitCheck && !limitCheck.allowed) {
+      return {
+        error: limitCheck.error,
+        code: limitCheck.code,
+        maxSmtpAccounts: limitCheck.maxSmtpAccounts
+      };
+    }
+
     const err = validateRequired(account, ['host', 'username', 'password']);
     if (err) return { error: err };
 
@@ -21,10 +55,13 @@ function registerSmtpHandlers({
     return db.addSmtpAccount({ ...validated.value, password: encryptPassword(validated.value.password) });
   });
   safeHandler('smtpAccounts:update', (e, account) => {
-    const err = validateRequired(account, ['id', 'host', 'username', 'password']);
+    const err = validateRequired(account, ['id', 'host', 'username']);
     if (err) return { error: err };
 
-    const validated = validateSmtpSettings(account, { requireId: true, requireCredentials: true });
+    const existingAccount = db.getAllSmtpAccounts().find((entry) => entry.id === account.id);
+    const resolvedAccount = resolveStoredPassword(account, existingAccount);
+
+    const validated = validateSmtpSettings(resolvedAccount, { requireId: true, requireCredentials: true });
     if (validated.error) return { error: validated.error };
 
     db.updateSmtpAccount({ ...validated.value, password: encryptPassword(validated.value.password) });
@@ -46,14 +83,26 @@ function registerSmtpHandlers({
 
   safeHandler('smtp:get', () => {
     const primaryAccount = getPrimarySmtpAccount(false);
-    return primaryAccount ? decryptSmtpAccount(primaryAccount) : null;
+    return primaryAccount ? sanitizeAccountForRenderer(primaryAccount) : null;
   });
   safeHandler('smtp:save', (e, settings) => {
-    const validated = validateSmtpSettings(settings, { requireCredentials: true });
+    const primaryAccount = getPrimarySmtpAccount(false);
+    if (!primaryAccount) {
+      const limitCheck = entitlementService?.canAddSmtpAccount?.(db.getAllSmtpAccounts().length);
+      if (limitCheck && !limitCheck.allowed) {
+        return {
+          error: limitCheck.error,
+          code: limitCheck.code,
+          maxSmtpAccounts: limitCheck.maxSmtpAccounts
+        };
+      }
+    }
+
+    const resolvedSettings = resolveStoredPassword(settings, primaryAccount);
+    const validated = validateSmtpSettings(resolvedSettings, { requireCredentials: true });
     if (validated.error) return { error: validated.error };
 
     const encrypted = { ...validated.value, password: encryptPassword(validated.value.password) };
-    const primaryAccount = getPrimarySmtpAccount(false);
     if (primaryAccount) {
       encrypted.id = primaryAccount.id;
       encrypted.isDefault = true;
@@ -64,7 +113,9 @@ function registerSmtpHandlers({
     return { success: true };
   });
   safeHandler('smtp:test', (e, settings) => {
-    const validated = validateSmtpSettings(settings, { requireCredentials: true });
+    const primaryAccount = getPrimarySmtpAccount(false);
+    const resolvedSettings = resolveStoredPassword(settings, primaryAccount);
+    const validated = validateSmtpSettings(resolvedSettings, { requireCredentials: true });
     if (validated.error) return { error: validated.error };
 
     return emailService.testConnection(validated.value);

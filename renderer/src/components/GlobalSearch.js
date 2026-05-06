@@ -1,140 +1,158 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Search, Users, Send, FileText, X } from 'lucide-react';
+import { Search, Users, Send, FileText, X, ArrowRight, LayoutDashboard,
+  CheckCircle, ShieldAlert, Ban, Zap, Settings, BarChart3, Inbox } from 'lucide-react';
 import { useNavigation } from './NavigationContext';
+
+const QUICK_LINKS = [
+  { type: 'nav', label: 'Dashboard',      icon: LayoutDashboard, path: '/'              },
+  { type: 'nav', label: 'Campaigns',      icon: Send,            path: '/campaigns'     },
+  { type: 'nav', label: 'Contacts',       icon: Users,           path: '/contacts'      },
+  { type: 'nav', label: 'Templates',      icon: FileText,        path: '/templates'     },
+  { type: 'nav', label: 'Verify',         icon: CheckCircle,     path: '/verify'        },
+  { type: 'nav', label: 'Spam Checker',   icon: ShieldAlert,     path: '/spam-checker'  },
+  { type: 'nav', label: 'Blacklist',      icon: Ban,             path: '/blacklist'     },
+  { type: 'nav', label: 'Automations',    icon: Zap,             path: '/automations'   },
+  { type: 'nav', label: 'Analytics',      icon: BarChart3,       path: '/engagement'    },
+  { type: 'nav', label: 'Inbox Placement',icon: Inbox,           path: '/inbox-placement'},
+  { type: 'nav', label: 'Settings',       icon: Settings,        path: '/settings'      },
+];
+
+function iconFor(type) {
+  if (type === 'contact')  return <Users size={15} />;
+  if (type === 'campaign') return <Send size={15} />;
+  if (type === 'template') return <FileText size={15} />;
+  return <Search size={15} />;
+}
 
 function GlobalSearch() {
   const { navigateTo } = useNavigation();
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState('');
+  const [open, setOpen]       = useState(false);
+  const [query, setQuery]     = useState('');
   const [results, setResults] = useState({ contacts: [], campaigns: [], templates: [] });
-  const inputRef = useRef(null);
-  const debounceRef = useRef(null);
+  const [cursor, setCursor]   = useState(0);
+  const inputRef  = useRef(null);
+  const debounce  = useRef(null);
+  const listRef   = useRef(null);
 
-  // Keyboard shortcut: Ctrl+K to open
+  const close = useCallback(() => { setOpen(false); setQuery(''); setResults({ contacts: [], campaigns: [], templates: [] }); setCursor(0); }, []);
+
   useEffect(() => {
-    const handler = (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
-        e.preventDefault();
-        setOpen(prev => !prev);
-      }
-      if (e.key === 'Escape') setOpen(false);
+    const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k') { e.preventDefault(); setOpen(p => !p); }
+      if (e.key === 'Escape') close();
     };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, []);
+    const onBulky = () => setOpen(true);
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('bulky:open-search', onBulky);
+    return () => { window.removeEventListener('keydown', onKey); window.removeEventListener('bulky:open-search', onBulky); };
+  }, [close]);
 
-  useEffect(() => {
-    if (open && inputRef.current) inputRef.current.focus();
-  }, [open]);
+  useEffect(() => { if (open) setTimeout(() => inputRef.current?.focus(), 60); }, [open]);
+
+  const flatItems = useCallback(() => {
+    const hasQuery = query.trim().length > 0;
+    if (!hasQuery) return QUICK_LINKS;
+    const items = [];
+    results.contacts.forEach(c  => items.push({ type: 'contact',  label: c.email,  sub: [c.firstName, c.lastName].filter(Boolean).join(' '), path: '/contacts' }));
+    results.campaigns.forEach(c => items.push({ type: 'campaign', label: c.name,   sub: `Campaign · ${c.status || 'draft'}`,                  path: '/campaigns' }));
+    results.templates.forEach(t => items.push({ type: 'template', label: t.name,   sub: 'Template',                                           path: '/templates' }));
+    return items;
+  }, [query, results]);
+
+  const items = flatItems();
 
   const doSearch = useCallback(async (q) => {
     if (!q || q.length < 2) { setResults({ contacts: [], campaigns: [], templates: [] }); return; }
     try {
       const data = await window.electron.search.global(q);
       setResults(data || { contacts: [], campaigns: [], templates: [] });
-    } catch (e) { console.warn('GlobalSearch error:', e?.message); }
+      setCursor(0);
+    } catch {}
   }, []);
 
   const handleChange = (e) => {
     const val = e.target.value;
     setQuery(val);
-    clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => doSearch(val), 250);
+    clearTimeout(debounce.current);
+    debounce.current = setTimeout(() => doSearch(val), 220);
   };
 
-  const handleSelect = (type, item) => {
-    setOpen(false);
-    setQuery('');
-    if (type === 'contact') navigateTo('/contacts');
-    else if (type === 'campaign') navigateTo('/campaigns');
-    else if (type === 'template') navigateTo('/templates');
+  const handleSelect = (item) => { navigateTo(item.path); close(); };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); setCursor(c => Math.min(c + 1, items.length - 1)); }
+    if (e.key === 'ArrowUp')   { e.preventDefault(); setCursor(c => Math.max(c - 1, 0)); }
+    if (e.key === 'Enter' && items[cursor]) handleSelect(items[cursor]);
   };
 
-  const totalResults = results.contacts.length + results.campaigns.length + results.templates.length;
+  useEffect(() => {
+    const el = listRef.current?.children[cursor];
+    el?.scrollIntoView({ block: 'nearest' });
+  }, [cursor]);
 
   if (!open) return null;
 
+  const hasQuery = query.trim().length > 0;
+  const totalResults = results.contacts.length + results.campaigns.length + results.templates.length;
+
   return (
-    <div style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', justifyContent: 'center', paddingTop: '80px' }}
-      onClick={(e) => { if (e.target === e.currentTarget) setOpen(false); }}>
-      <div style={{
-        position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)'
-      }} />
-      <div style={{
-        position: 'relative', width: '560px', maxHeight: '480px', background: 'var(--bg-primary)',
-        borderRadius: '12px', border: '1px solid var(--border)', boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
-        overflow: 'hidden', display: 'flex', flexDirection: 'column'
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
-          <Search size={18} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
-          <input ref={inputRef} type="text" value={query} onChange={handleChange}
-            placeholder="Search contacts, campaigns, templates..." autoFocus
-            style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', color: 'var(--text)', fontSize: '15px' }} />
-          <kbd style={{ fontSize: '11px', padding: '2px 6px', borderRadius: '4px', border: '1px solid var(--border)', color: 'var(--text-muted)' }}>ESC</kbd>
-          <X size={16} style={{ cursor: 'pointer', color: 'var(--text-muted)' }} onClick={() => setOpen(false)} />
+    <div className="cmd-overlay" onClick={close} role="presentation">
+      <div className="cmd-palette" onClick={e => e.stopPropagation()} role="dialog"
+        aria-label="Command palette" aria-modal="true">
+        {/* Input */}
+        <div className="cmd-input-row">
+          <Search size={17} className="cmd-search-icon" />
+          <input
+            ref={inputRef}
+            className="cmd-input"
+            value={query}
+            onChange={handleChange}
+            onKeyDown={handleKeyDown}
+            placeholder="Search campaigns, contacts, templates…"
+            aria-autocomplete="list"
+            autoComplete="off"
+            spellCheck={false}
+          />
+          {query && (
+            <button className="cmd-clear" onClick={() => { setQuery(''); inputRef.current?.focus(); }}>
+              <X size={14} />
+            </button>
+          )}
+          <kbd className="cmd-esc">esc</kbd>
         </div>
 
-        <div style={{ flex: 1, overflow: 'auto', padding: '8px' }}>
-          {query.length >= 2 && totalResults === 0 && (
-            <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-muted)' }}>No results for "{query}"</div>
+        {/* Results */}
+        <div className="cmd-results" ref={listRef} role="listbox">
+          {!hasQuery && (
+            <div className="cmd-section-label">Quick navigation</div>
           )}
-
-          {results.contacts.length > 0 && (
-            <div>
-              <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', padding: '6px 8px', textTransform: 'uppercase' }}>Contacts</div>
-              {results.contacts.map(c => (
-                <div key={c.id} onClick={() => handleSelect('contact', c)} style={{
-                  display: 'flex', alignItems: 'center', gap: '10px', padding: '8px', borderRadius: '6px', cursor: 'pointer'
-                }} onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-secondary)'} onMouseLeave={e => e.currentTarget.style.background = ''}>
-                  <Users size={14} style={{ color: 'var(--accent)' }} />
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: '13px', fontWeight: 500 }}>{c.email}</div>
-                    <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{[c.firstName, c.lastName].filter(Boolean).join(' ') || c.company || ''}</div>
-                  </div>
-                </div>
-              ))}
+          {hasQuery && totalResults === 0 && query.length >= 2 && (
+            <div className="cmd-empty">No results for "{query}"</div>
+          )}
+          {items.map((item, i) => (
+            <div
+              key={`${item.type}-${i}`}
+              className={`cmd-item ${cursor === i ? 'cmd-item--active' : ''}`}
+              role="option"
+              aria-selected={cursor === i}
+              onClick={() => handleSelect(item)}
+              onMouseEnter={() => setCursor(i)}
+            >
+              <span className="cmd-item__icon">
+                {item.icon ? <item.icon size={15} /> : iconFor(item.type)}
+              </span>
+              <span className="cmd-item__label">{item.label}</span>
+              {item.sub && <span className="cmd-item__sub">{item.sub}</span>}
+              <ArrowRight size={13} className="cmd-item__arrow" />
             </div>
-          )}
+          ))}
+        </div>
 
-          {results.campaigns.length > 0 && (
-            <div>
-              <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', padding: '6px 8px', textTransform: 'uppercase' }}>Campaigns</div>
-              {results.campaigns.map(c => (
-                <div key={c.id} onClick={() => handleSelect('campaign', c)} style={{
-                  display: 'flex', alignItems: 'center', gap: '10px', padding: '8px', borderRadius: '6px', cursor: 'pointer'
-                }} onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-secondary)'} onMouseLeave={e => e.currentTarget.style.background = ''}>
-                  <Send size={14} style={{ color: '#6366f1' }} />
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: '13px', fontWeight: 500 }}>{c.name}</div>
-                    <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{c.status}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {results.templates.length > 0 && (
-            <div>
-              <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', padding: '6px 8px', textTransform: 'uppercase' }}>Templates</div>
-              {results.templates.map(t => (
-                <div key={t.id} onClick={() => handleSelect('template', t)} style={{
-                  display: 'flex', alignItems: 'center', gap: '10px', padding: '8px', borderRadius: '6px', cursor: 'pointer'
-                }} onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-secondary)'} onMouseLeave={e => e.currentTarget.style.background = ''}>
-                  <FileText size={14} style={{ color: '#10b981' }} />
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: '13px', fontWeight: 500 }}>{t.name}</div>
-                    <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t.category}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {!query && (
-            <div style={{ padding: '16px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px' }}>
-              Type to search across contacts, campaigns, and templates
-            </div>
-          )}
+        {/* Footer */}
+        <div className="cmd-footer">
+          <span><kbd>↑↓</kbd> navigate</span>
+          <span><kbd>↵</kbd> select</span>
+          <span><kbd>esc</kbd> close</span>
         </div>
       </div>
     </div>

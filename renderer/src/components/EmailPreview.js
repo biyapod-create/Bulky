@@ -21,7 +21,7 @@ const CLIENT_STYLES = {
  *          so you can see how the email looks inside Gmail / Outlook / Apple Mail.
  *
  * Mobile / Tablet: renders the raw email HTML directly with NO wrapper shell.
- *          This is the only way to see genuine responsive reflow — the wrapper
+ *          This is the only way to see genuine responsive reflow -- the wrapper
  *          shell's own max-width / padding would interfere with the email's layout.
  *          We still inject the client font-family into the body so you can compare
  *          how the fonts differ between clients at that viewport size.
@@ -53,7 +53,7 @@ function buildSrcDoc(device, deviceConfig, clientStyle, subject, content, fromNa
       return doc;
     }
 
-    // Fragment — wrap minimally, no chrome
+    // Fragment -- wrap minimally, no chrome
     return `<!DOCTYPE html>
 <html lang="en">
 <head>

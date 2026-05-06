@@ -1,13 +1,46 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Users, Plus, Upload, Download, Trash2, Search, Edit2, Tag, CheckCircle,
-  XCircle, AlertTriangle, RefreshCw, ChevronUp, ChevronDown, ChevronLeft,
-  ChevronRight, X, Eye, BadgeCheck, ArrowUpDown, MoreHorizontal, Play, Pause, Square,
-  FileDown, Loader2
+  Plus, Trash2, Edit2, Tag, CheckCircle,
+  XCircle, AlertTriangle, ChevronUp, ChevronDown, ArrowUpDown, MoreHorizontal
 } from 'lucide-react';
 import Modal from '../components/Modal';
 import { useToast } from '../components/ToastContext';
 import useLiveDataRefresh from '../hooks/useLiveDataRefresh';
+import {
+  ContactsBulkActionsBar,
+  ContactsDropOverlay,
+  ContactsFiltersToolbar,
+  ContactsInsightsGrid,
+  ContactsPageHeader,
+  ContactsSummaryStats,
+  ContactsVerificationProgressCard
+} from '../features/contacts/ContactsSurfaceSections';
+import ContactsTableCard from '../features/contacts/ContactsTableCard';
+
+const EMPTY_CONTACT_FORM = {
+  email: '',
+  firstName: '',
+  lastName: '',
+  company: '',
+  phone: '',
+  customField1: '',
+  customField2: '',
+  listId: '',
+  tags: []
+};
+
+const EMPTY_LIST_FORM = {
+  name: '',
+  description: '',
+  color: '#5bb4d4'
+};
+
+const EMPTY_IMPORT_DATA = {
+  contacts: [],
+  listId: '',
+  summary: null,
+  sampleContacts: []
+};
 
 function Contacts({ isActive }) {
   const { addToast } = useToast();
@@ -18,12 +51,14 @@ function Contacts({ isActive }) {
   const [showModal, setShowModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [showTagModal, setShowTagModal] = useState(false);
+  const [showListModal, setShowListModal] = useState(false);
   const [showDetailModal, setShowDetailModal] = useState(false);
   const [showBulkTagModal, setShowBulkTagModal] = useState(false);
+  const [showBulkListModal, setShowBulkListModal] = useState(false);
   const [editingContact, setEditingContact] = useState(null);
   const [detailContact, setDetailContact] = useState(null);
   const [selectedContacts, setSelectedContacts] = useState([]);
-  const [importData, setImportData] = useState({ contacts: [], listId: '' });
+  const [importData, setImportData] = useState(EMPTY_IMPORT_DATA);
   const [importProgress, setImportProgress] = useState(null);
   const [importPreview, setImportPreview] = useState(null);
   // importPreview = { headers: [], rows: [], mapping: {}, totalRows: 0, listId: '' }
@@ -55,12 +90,10 @@ function Contacts({ isActive }) {
     tag: ''
   });
 
-  const [formData, setFormData] = useState({
-    email: '', firstName: '', lastName: '', company: '', phone: '',
-    customField1: '', customField2: '', listId: '', tags: []
-  });
+  const [formData, setFormData] = useState(EMPTY_CONTACT_FORM);
 
   const [newTag, setNewTag] = useState({ name: '', color: '#5bb4d4' });
+  const [newList, setNewList] = useState(EMPTY_LIST_FORM);
   const searchTimeoutRef = useRef(null);
   const verifyResultsRef = useRef([]);
   const bulkVerifyingRef = useRef(false);
@@ -69,6 +102,7 @@ function Contacts({ isActive }) {
   useEffect(() => {
     loadLists();
     loadTags();
+    loadContactStats();
   }, []);
 
   // Debounced search
@@ -105,6 +139,28 @@ function Contacts({ isActive }) {
     }
   };
 
+  useEffect(() => {
+    setFormData((prev) => {
+      const nextListId = prev.listId && !lists.some((list) => list.id === prev.listId) ? '' : prev.listId;
+      const nextTags = Array.isArray(prev.tags)
+        ? prev.tags.filter((tagId) => tags.some((tag) => tag.id === tagId))
+        : [];
+      if (nextListId === prev.listId && nextTags.length === prev.tags.length) {
+        return prev;
+      }
+      return { ...prev, listId: nextListId, tags: nextTags };
+    });
+
+    setFilters((prev) => {
+      const nextListId = prev.listId && !lists.some((list) => list.id === prev.listId) ? '' : prev.listId;
+      const nextTag = prev.tag && !tags.some((tag) => tag.id === prev.tag) ? '' : prev.tag;
+      if (nextListId === prev.listId && nextTag === prev.tag) {
+        return prev;
+      }
+      return { ...prev, listId: nextListId, tag: nextTag };
+    });
+  }, [lists, tags]);
+
   const loadContactStats = async () => {
     try {
       if (window.electron?.contacts?.getStats) {
@@ -118,7 +174,9 @@ function Contacts({ isActive }) {
 
   const loadContacts = useCallback(async (overrides = {}) => {
     if (!window.electron) return;
-    setLoading(true);
+    // Silent refreshes (from data-change events / polling) skip the loading
+    // spinner so the table doesn't flash empty on every background sync.
+    if (!overrides.silent) setLoading(true);
     try {
       const nextPage = overrides.page ?? pagination.page;
       const nextPerPage = overrides.perPage ?? pagination.perPage;
@@ -183,6 +241,10 @@ function Contacts({ isActive }) {
     sortDirection
   ]);
 
+  useEffect(() => {
+    loadContacts();
+  }, [loadContacts]);
+
   const getListLabel = useCallback((contact) => {
     if (contact.listName) return contact.listName;
     if (!contact.listId) return '';
@@ -237,9 +299,11 @@ function Contacts({ isActive }) {
     setIsVerifyPaused(false);
   }, []);
 
-  const refreshContactsSurface = useCallback(async () => {
+  // overrides is forwarded from useLiveDataRefresh -- passing { silent: true }
+  // prevents the loading spinner from flashing on every background data-change event.
+  const refreshContactsSurface = useCallback(async (overrides = {}) => {
     await Promise.all([
-      loadContacts(),
+      loadContacts(overrides),
       loadContactStats(),
       loadLists(),
       loadTags()
@@ -250,11 +314,11 @@ function Contacts({ isActive }) {
   useLiveDataRefresh({
     load: refreshContactsSurface,
     isActive,
-    dataTypes: ['contacts'],
+    dataTypes: ['contacts', 'lists', 'tags'],
     pollMs: 30000
   });
 
-  // 30-second polling fallback — guards against missed IPC events when
+  // 30-second polling fallback -- guards against missed IPC events when
   // the window loses focus during a large CSV import.
 
   useEffect(() => {
@@ -281,6 +345,61 @@ function Contacts({ isActive }) {
       }
     };
   }, []);
+
+  const closeContactModal = useCallback(() => {
+    setShowModal(false);
+    setEditingContact(null);
+    setFormData(EMPTY_CONTACT_FORM);
+  }, []);
+
+  const openImportConfirmation = useCallback((payload) => {
+    const contacts = Array.isArray(payload?.contacts) ? payload.contacts : [];
+    const sampleContacts = Array.isArray(payload?.sampleContacts) && payload.sampleContacts.length > 0
+      ? payload.sampleContacts
+      : contacts.slice(0, 100);
+
+    setImportData({
+      contacts,
+      listId: payload?.listId || payload?.summary?.listId || '',
+      summary: payload?.summary || null,
+      sampleContacts
+    });
+    setShowImportModal(true);
+  }, []);
+
+  const handleAddList = async () => {
+    if (!newList.name.trim()) {
+      addToast('List name is required', 'error');
+      return;
+    }
+
+    try {
+      const result = await window.electron.lists.add({
+        name: newList.name.trim(),
+        description: newList.description.trim(),
+        color: newList.color
+      });
+      if (result?.error) {
+        addToast(result.error, 'error');
+        return;
+      }
+      setNewList(EMPTY_LIST_FORM);
+      await refreshContactsSurface();
+      addToast('List created', 'success');
+    } catch (error) {
+      addToast('Failed to create list', 'error');
+    }
+  };
+
+  const handleDeleteList = async (listId) => {
+    try {
+      await window.electron.lists.delete(listId);
+      await refreshContactsSurface();
+      addToast('List deleted', 'success');
+    } catch (error) {
+      addToast('Failed to delete list', 'error');
+    }
+  };
 
   const handleSort = (column) => {
     if (sortColumn === column) {
@@ -311,22 +430,32 @@ function Contacts({ isActive }) {
         customField1: contact.customField1 || '',
         customField2: contact.customField2 || '',
         listId: contact.listId || '',
-        tags: contact.tags ? (typeof contact.tags === 'string' ? JSON.parse(contact.tags) : contact.tags) : []
+        tags: (() => {
+          if (!contact.tags) return [];
+          if (typeof contact.tags === 'string') {
+            try { return JSON.parse(contact.tags); } catch { return []; }
+          }
+          return Array.isArray(contact.tags) ? contact.tags : [];
+        })()
       });
     } else {
       setEditingContact(null);
-      setFormData({ email: '', firstName: '', lastName: '', company: '', phone: '', customField1: '', customField2: '', listId: '', tags: [] });
+      setFormData(EMPTY_CONTACT_FORM);
     }
     setShowModal(true);
   };
 
   const handleViewDetail = async (contact) => {
-    setDetailContact(contact);
     setShowDetailModal(true);
     try {
-      // placeholder for detail logic
+      const detail = await window.electron?.contacts?.getDetail?.(contact.id);
+      if (detail?.error) {
+        throw new Error(detail.error);
+      }
+      setDetailContact(detail || contact);
     } catch (e) {
-      // ignored
+      setDetailContact(contact);
+      addToast('Showing basic contact details only', 'warning');
     }
   };
 
@@ -340,7 +469,7 @@ function Contacts({ isActive }) {
       if (editingContact) {
         await window.electron.contacts.update({ ...formData, id: editingContact.id, tags: formData.tags });
         addToast('Contact updated', 'success');
-        setShowModal(false);
+        closeContactModal();
         await loadContacts();
       } else {
         const result = await window.electron.contacts.add({ ...formData, tags: formData.tags });
@@ -349,7 +478,7 @@ function Contacts({ isActive }) {
           return;
         }
         addToast('Contact added', 'success');
-        setShowModal(false);
+        closeContactModal();
         setPagination(prev => ({ ...prev, page: 1 }));
         await loadContacts({ page: 1 });
       }
@@ -367,7 +496,6 @@ function Contacts({ isActive }) {
       if (result.canceled) return;
 
       if (result.success && result.headers && result.rows?.length > 0) {
-        // New flow: show column mapping preview
         setImportPreview({
           headers: result.headers,
           rows: result.rows,
@@ -376,9 +504,22 @@ function Contacts({ isActive }) {
           listId: ''
         });
       } else if (result.success && result.contacts?.length > 0) {
-        // Fallback: old flow without column mapping
-        setImportData({ contacts: result.contacts, listId: '' });
-        setShowImportModal(true);
+        openImportConfirmation({
+          contacts: result.contacts,
+          listId: '',
+          summary: {
+            totalRows: result.contacts.length,
+            mappedRows: result.contacts.length,
+            blankEmailRows: 0,
+            invalidEmails: 0,
+            duplicateInFile: 0,
+            existingDuplicates: 0,
+            readyToImport: result.contacts.length,
+            skippedRows: 0,
+            listId: '',
+            listName: ''
+          }
+        });
       } else if (result.error) {
         addToast(result.error, 'error');
       } else {
@@ -410,36 +551,32 @@ function Contacts({ isActive }) {
     if (!importPreview) return;
     const { rows, mapping, listId } = importPreview;
 
-    // Validate: email column must be mapped
-    const emailHeader = Object.keys(mapping).find(k => mapping[k] === 'email');
-    if (!emailHeader) {
-      addToast('You must map at least one column to Email', 'error');
-      return;
-    }
+    try {
+      const result = await window.electron.contacts.prepareImport({
+        rows,
+        mapping,
+        listId: listId || ''
+      });
 
-    // Build contacts from raw rows using the mapping
-    const contacts = [];
-    for (const row of rows) {
-      const email = (row[emailHeader] || '').trim();
-      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) continue;
-
-      const contact = { email, firstName: '', lastName: '', company: '', phone: '' };
-      for (const [header, field] of Object.entries(mapping)) {
-        if (field === 'skip' || field === 'email' || !row[header]) continue;
-        contact[field] = (row[header] || '').trim();
+      if (!result?.success) {
+        addToast(result?.error || 'Failed to prepare import', 'error');
+        return;
       }
-      contacts.push(contact);
-    }
 
-    if (contacts.length === 0) {
-      addToast('No valid email addresses found with current mapping', 'error');
-      return;
-    }
+      openImportConfirmation({
+        contacts: result.contacts || [],
+        listId: result.summary?.listId || listId || '',
+        summary: result.summary || null,
+        sampleContacts: result.sampleContacts || []
+      });
+      setImportPreview(null);
 
-    // Pass to the existing import confirmation flow
-    setImportData({ contacts, listId: listId || '' });
-    setImportPreview(null);
-    setShowImportModal(true);
+      if ((result.summary?.readyToImport || 0) === 0) {
+        addToast('No new contacts are ready to import with the current mapping', 'warning');
+      }
+    } catch (error) {
+      addToast('Import preparation failed: ' + error.message, 'error');
+    }
   };
 
   const confirmImport = async () => {
@@ -455,6 +592,9 @@ function Contacts({ isActive }) {
       setImportProgress({ current: 0, total: toImport.length });
 
       const result = await window.electron.contacts.addBulk(toImport);
+      if (result?.error) {
+        throw new Error(result.error);
+      }
       const details = [];
       if (result?.duplicates) details.push(`${result.duplicates} duplicates`);
       if (result?.invalid) details.push(`${result.invalid} invalid`);
@@ -462,8 +602,8 @@ function Contacts({ isActive }) {
 
       setShowImportModal(false);
       setImportProgress(null);
-      loadContacts();
-      loadContactStats();
+      setImportData(EMPTY_IMPORT_DATA);
+      await refreshContactsSurface();
     } catch (error) {
       addToast('Import failed: ' + (error.message || 'Unknown error'), 'error');
       setImportProgress(null);
@@ -560,7 +700,11 @@ function Contacts({ isActive }) {
 
     setVerifyingContactId(contact.id);
     try {
-      const result = await window.electron.verify.email(contact.email);
+      const result = await window.electron.verify.email(contact.email, {
+        smtpCheck: true,
+        timeout: 7000,
+        checkCatchAll: false
+      });
       if (result?.error) {
         addToast(result.error, 'error');
         return;
@@ -606,13 +750,58 @@ function Contacts({ isActive }) {
     }
   };
 
+  const handleBulkAddToList = async (listId) => {
+    if (selectedContacts.length === 0) return;
+    try {
+      let result;
+      if (window.electron.contacts.addToListBulk) {
+        result = await window.electron.contacts.addToListBulk(selectedContacts, listId);
+      } else {
+        // Fallback: update each contact individually
+        await Promise.all(
+          selectedContacts.map(id => {
+            const contact = contacts.find(c => c.id === id);
+            if (contact) return window.electron.contacts.update({ ...contact, listId });
+            return Promise.resolve();
+          })
+        );
+        result = { success: true, updated: selectedContacts.length, skipped: 0 };
+      }
+      if (result?.error) {
+        throw new Error(result.error);
+      }
+      const updated = result?.updated ?? selectedContacts.length;
+      const skipped = result?.skipped || 0;
+      addToast(
+        skipped > 0
+          ? `Added ${updated} contact(s) to list (${skipped} already assigned or unavailable)`
+          : `Added ${updated} contact(s) to list`,
+        'success'
+      );
+      await refreshContactsSurface();
+    } catch (error) {
+      addToast('Failed to add contacts to list', 'error');
+    }
+    setShowBulkListModal(false);
+  };
+
   const handleBulkTag = async (tagId) => {
     if (selectedContacts.length === 0) return;
     try {
       if (window.electron.contacts.addTagBulk) {
-        await window.electron.contacts.addTagBulk(selectedContacts, tagId);
-        addToast(`Tagged ${selectedContacts.length} contacts`, 'success');
-        loadContacts();
+        const result = await window.electron.contacts.addTagBulk(selectedContacts, tagId);
+        if (result?.error) {
+          throw new Error(result.error);
+        }
+        const updated = result?.updated ?? selectedContacts.length;
+        const skipped = result?.skipped || 0;
+        addToast(
+          skipped > 0
+            ? `Tagged ${updated} contact(s) (${skipped} already tagged or unavailable)`
+            : `Tagged ${updated} contact(s)`,
+          'success'
+        );
+        await refreshContactsSurface();
       }
     } catch (error) {
       addToast('Tagging failed', 'error');
@@ -627,13 +816,13 @@ function Contacts({ isActive }) {
       if (result && typeof result === 'string') {
         addToast('Tag created', 'success');
         setNewTag({ name: '', color: '#5bb4d4' });
-        loadTags();
+        refreshContactsSurface();
       } else if (result && result.error) {
         addToast(result.error || 'Failed to create tag', 'error');
       } else {
         addToast('Tag created', 'success');
         setNewTag({ name: '', color: '#5bb4d4' });
-        loadTags();
+        refreshContactsSurface();
       }
     } catch (error) {
       addToast('Failed to create tag', 'error');
@@ -702,7 +891,7 @@ function Contacts({ isActive }) {
   const resetFilters = () => {
     if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
     setFilters({ search: '', listId: '', status: '', verified: '', tag: '' });
-    setDebouncedSearch(''); // flush immediately — don't wait for the 350ms debounce
+    setDebouncedSearch(''); // flush immediately -- don't wait for the 350ms debounce
     setSortColumn('createdAt');
     setSortDirection('DESC');
     setPagination(prev => ({ ...prev, page: 1 }));
@@ -739,7 +928,7 @@ function Contacts({ isActive }) {
     const files = Array.from(e.dataTransfer.files);
     const file = files.find(f => /\.(csv|xlsx?|json|txt)$/i.test(f.name));
     if (!file) { addToast('Please drop a CSV, Excel, JSON, or TXT file', 'error'); return; }
-    // In Electron, dropped files have a `path` property — use importRaw with that path
+    // In Electron, dropped files have a `path` property -- use importRaw with that path
     if (file.path && window.electron?.contacts?.importRaw) {
       try {
         // Pass the path directly via a custom IPC if available; otherwise fall back to dialog
@@ -763,474 +952,90 @@ function Contacts({ isActive }) {
   };
 
   return (
-    <div onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop} style={{ position: 'relative' }}>
-      {/* Drop zone overlay */}
-      {isDragging && (
-        <div style={{
-          position: 'absolute', inset: 0, zIndex: 100, background: 'rgba(91,180,212,0.1)',
-          border: '3px dashed var(--accent)', borderRadius: '12px',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none'
-        }}>
-          <div style={{ textAlign: 'center', color: 'var(--accent)' }}>
-            <Download size={48} style={{ margin: '0 auto 8px' }} />
-            <p style={{ fontSize: '18px', fontWeight: 600 }}>Drop file to import contacts</p>
-            <p style={{ fontSize: '13px', opacity: 0.7 }}>CSV, Excel, JSON, or TXT</p>
-          </div>
-        </div>
-      )}
+    <div className="page-container page-contacts" onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop} style={{ position: 'relative' }}>
+      <ContactsDropOverlay isDragging={isDragging} />
 
-      <div className="page-header flex justify-between items-center">
-        <div>
-          <h1 className="page-title">Contacts</h1>
-          <p className="page-subtitle">Manage your email contacts and lists.</p>
-        </div>
-        <div className="flex gap-2">
-          <button className="btn btn-outline" onClick={handleImport} title="Import contacts from CSV, TXT, Excel, JSON, PDF, Word">
-            <Download size={16} /> Import
-          </button>
-          <span className="text-xs text-muted" style={{ alignSelf: 'center', marginLeft: '-8px', marginRight: '8px' }}>CSV, XLSX, JSON, PDF</span>
-          <button className="btn btn-outline" onClick={handleExport} title="Export contacts to CSV">
-            <Upload size={16} /> Export
-          </button>
-          <button className="btn btn-primary" onClick={() => handleOpenModal()}><Plus size={16} /> Add Contact</button>
-        </div>
-      </div>
+      <ContactsPageHeader
+        onImport={handleImport}
+        onExport={handleExport}
+        onAddContact={() => handleOpenModal()}
+      />
 
-      {/* Summary Stats */}
-      <div className="stats-grid mb-4" style={{ gridTemplateColumns: 'repeat(5, 1fr)' }}>
-        <div className="stat-card" style={{ padding: '14px 16px', background: 'linear-gradient(135deg, rgba(91,180,212,0.1), rgba(91,180,212,0.03))' }}>
-          <div className="stat-content" style={{ textAlign: 'center' }}>
-            <div className="stat-value" style={{ fontSize: '22px', color: 'var(--accent)' }}>{(contactStats.total || 0).toLocaleString()}</div>
-            <div className="stat-label">Total</div>
-          </div>
-        </div>
-        <div className="stat-card" style={{ padding: '14px 16px', background: 'linear-gradient(135deg, rgba(34,197,94,0.1), rgba(34,197,94,0.03))' }}>
-          <div className="stat-content" style={{ textAlign: 'center' }}>
-            <div className="stat-value" style={{ fontSize: '22px', color: 'var(--success)' }}>{(contactStats.verified || 0).toLocaleString()}</div>
-            <div className="stat-label">Valid</div>
-          </div>
-        </div>
-        <div className="stat-card" style={{ padding: '14px 16px', background: 'linear-gradient(135deg, rgba(245,158,11,0.1), rgba(245,158,11,0.03))' }}>
-          <div className="stat-content" style={{ textAlign: 'center' }}>
-            <div className="stat-value" style={{ fontSize: '22px', color: 'var(--warning)' }}>{(contactStats.risky || 0).toLocaleString()}</div>
-            <div className="stat-label">Risky</div>
-          </div>
-        </div>
-        <div className="stat-card" style={{ padding: '14px 16px', background: 'linear-gradient(135deg, rgba(239,68,68,0.1), rgba(239,68,68,0.03))' }}>
-          <div className="stat-content" style={{ textAlign: 'center' }}>
-            <div className="stat-value" style={{ fontSize: '22px', color: 'var(--error)' }}>{(contactStats.invalid || 0).toLocaleString()}</div>
-            <div className="stat-label">Invalid</div>
-          </div>
-        </div>
-        <div className="stat-card" style={{ padding: '14px 16px', background: 'linear-gradient(135deg, rgba(107,114,128,0.1), rgba(107,114,128,0.03))' }}>
-          <div className="stat-content" style={{ textAlign: 'center' }}>
-            <div className="stat-value" style={{ fontSize: '22px', color: 'var(--text-muted)' }}>{(contactStats.unverified || 0).toLocaleString()}</div>
-            <div className="stat-label">Unverified</div>
-          </div>
-        </div>
-      </div>
+      <ContactsSummaryStats contactStats={contactStats} />
 
-      <div className="panel-grid mb-4">
-        <div className="insight-card">
-          <div className="insight-value">{contacts.length}</div>
-          <div className="insight-label">Visible On This Page</div>
-          <div className="insight-meta">
-            Page {pagination.page} of {Math.max(pagination.totalPages || 1, 1)} with {(pagination.totalCount || 0).toLocaleString()} matching contacts
-          </div>
-        </div>
-        <div className="insight-card">
-          <div className="insight-value">{verificationCoverage}%</div>
-          <div className="insight-label">Verification Coverage</div>
-          <div className="insight-meta">
-            {classifiedCount.toLocaleString()} contacts already classified into valid, risky, or invalid states
-          </div>
-          <div className="meter">
-            <div
-              className="meter-fill"
-              style={{
-                width: `${verificationCoverage}%`,
-                background: verificationCoverage >= 75 ? 'var(--success)' : verificationCoverage >= 40 ? 'var(--warning)' : 'var(--error)'
-              }}
-            />
-          </div>
-        </div>
-        <div className="insight-card">
-          <div className="insight-value">{selectedContacts.length}</div>
-          <div className="insight-label">Selection Ready</div>
-          <div className="insight-meta">
-            {selectedContacts.length > 0
-              ? `${selectedVerificationBreakdown.valid} valid, ${selectedVerificationBreakdown.risky} risky, ${selectedVerificationBreakdown.invalid} invalid, ${selectedVerificationBreakdown.unverified} unverified on this page`
-              : 'Select contacts to unlock bulk verify, export, tag, and delete actions'}
-          </div>
-        </div>
-        <div className="insight-card">
-          <div className="insight-value">{activeFilterCount}</div>
-          <div className="insight-label">Active Filters</div>
-          <div className="insight-meta">
-            {activeFilterCount > 0
-              ? 'Filters are actively narrowing the visible contact set'
-              : 'No filters applied; you are viewing the broadest contact surface'}
-          </div>
-        </div>
-      </div>
+      <ContactsInsightsGrid
+        contactsCount={contacts.length}
+        pagination={pagination}
+        verificationCoverage={verificationCoverage}
+        classifiedCount={classifiedCount}
+        selectedContactsCount={selectedContacts.length}
+        selectedVerificationBreakdown={selectedVerificationBreakdown}
+        activeFilterCount={activeFilterCount}
+      />
 
-      {/* Filters */}
-      <div className="card mb-4">
-        <div className="flex gap-3 items-center flex-wrap">
-          <div className="toolbar-search">
-            <Search size={18} />
-            <input
-              type="text"
-              className="form-input"
-              placeholder="Search contacts..."
-              style={{ paddingLeft: '40px' }}
-              value={filters.search}
-              onChange={(e) => setFilters({ ...filters, search: e.target.value })}
-            />
-          </div>
+      <ContactsFiltersToolbar
+        filters={filters}
+        setFilters={setFilters}
+        setPagination={setPagination}
+        lists={lists}
+        tags={tags}
+        resetFilters={resetFilters}
+        refreshContactsSurface={refreshContactsSurface}
+        onOpenLists={() => setShowListModal(true)}
+        onOpenTags={() => setShowTagModal(true)}
+      />
 
-          <select className="form-select" style={{ width: '150px' }} value={filters.listId} onChange={(e) => { setFilters({ ...filters, listId: e.target.value }); setPagination(p => ({ ...p, page: 1 })); }}>
-            <option value="">All Lists</option>
-            {lists.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
-          </select>
+      <ContactsBulkActionsBar
+        selectedContactsCount={selectedContacts.length}
+        selectedVerificationBreakdown={selectedVerificationBreakdown}
+        handleDelete={handleDelete}
+        handleExport={handleExport}
+        onOpenBulkTag={() => setShowBulkTagModal(true)}
+        onOpenBulkList={() => setShowBulkListModal(true)}
+        handleBulkVerify={handleBulkVerify}
+        isBulkVerifying={isBulkVerifying}
+        clearSelection={() => setSelectedContacts([])}
+      />
 
-          <select className="form-select" style={{ width: '130px' }} value={filters.status} onChange={(e) => { setFilters({ ...filters, status: e.target.value }); setPagination(p => ({ ...p, page: 1 })); }}>
-            <option value="">All Status</option>
-            <option value="active">Active</option>
-            <option value="inactive">Inactive</option>
-            <option value="bounced">Bounced</option>
-          </select>
+      <ContactsVerificationProgressCard
+        isBulkVerifying={isBulkVerifying}
+        verifyProgress={verifyProgress}
+        verifyLiveResults={verifyLiveResults}
+        isVerifyPaused={isVerifyPaused}
+        handlePauseVerify={handlePauseVerify}
+        handleResumeVerify={handleResumeVerify}
+        handleStopVerify={handleStopVerify}
+      />
 
-          <select className="form-select" style={{ width: '140px' }} value={filters.verified} onChange={(e) => { setFilters({ ...filters, verified: e.target.value }); setPagination(p => ({ ...p, page: 1 })); }}>
-            <option value="">Verification</option>
-            <option value="valid">Valid</option>
-            <option value="risky">Risky</option>
-            <option value="invalid">Invalid</option>
-            <option value="unverified">Unverified</option>
-          </select>
-
-          {tags.length > 0 && (
-            <select className="form-select" style={{ width: '120px' }} value={filters.tag} onChange={(e) => { setFilters({ ...filters, tag: e.target.value }); setPagination(p => ({ ...p, page: 1 })); }}>
-              <option value="">All Tags</option>
-              {tags.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-            </select>
-          )}
-
-          <button className="btn btn-outline btn-sm" onClick={resetFilters}>
-            <RefreshCw size={14} /> Reset
-          </button>
-
-          <button className="btn btn-outline btn-sm" onClick={() => refreshContactsSurface()}>
-            <RefreshCw size={14} /> Refresh
-          </button>
-
-          <button className="btn btn-outline btn-sm" onClick={() => setShowTagModal(true)}>
-            <Tag size={14} /> Tags
-          </button>
-        </div>
-      </div>
-
-      {/* Bulk Actions */}
-      {selectedContacts.length > 0 && (
-        <div className="card mb-4" style={{ background: 'var(--accent-dim)', borderColor: 'var(--accent)' }}>
-          <div className="flex justify-between items-center" style={{ gap: '12px', flexWrap: 'wrap' }}>
-            <div>
-              <div style={{ fontWeight: 500 }}>{selectedContacts.length} contact(s) selected</div>
-              <div className="text-sm text-muted" style={{ marginTop: '4px' }}>
-                {selectedVerificationBreakdown.valid} valid, {selectedVerificationBreakdown.risky} risky, {selectedVerificationBreakdown.invalid} invalid, {selectedVerificationBreakdown.unverified} unverified on this page
-              </div>
-            </div>
-            <div className="flex gap-2">
-              <button className="btn btn-danger btn-sm" onClick={handleDelete}>
-                <Trash2 size={14} /> Delete
-              </button>
-              <button className="btn btn-outline btn-sm" onClick={handleExport}>
-                <FileDown size={14} /> Export
-              </button>
-              <button className="btn btn-outline btn-sm" onClick={() => setShowBulkTagModal(true)}>
-                <Tag size={14} /> Tag
-              </button>
-              <button className="btn btn-outline btn-sm" onClick={handleBulkVerify} disabled={isBulkVerifying}>
-                {isBulkVerifying ? <Loader2 size={14} className="animate-spin" /> : <BadgeCheck size={14} />}
-                {isBulkVerifying ? ' Verifying...' : ' Verify'}
-              </button>
-              <button className="btn btn-outline btn-sm" onClick={() => setSelectedContacts([])}>
-                <X size={14} /> Clear
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {(isBulkVerifying || verifyProgress || verifyLiveResults.length > 0) && (
-        <div className="card mb-4" style={{ borderColor: 'var(--accent)', background: isBulkVerifying ? 'var(--accent-dim)' : 'var(--bg-secondary)' }}>
-          <div className="flex justify-between items-start" style={{ gap: '16px', flexWrap: 'wrap' }}>
-            <div style={{ flex: 1, minWidth: '240px' }}>
-              <div className="flex items-center gap-2 mb-2">
-                <BadgeCheck size={16} style={{ color: 'var(--accent)' }} />
-                <strong>Verification Progress</strong>
-                {isVerifyPaused && <span className="badge badge-warning">Paused</span>}
-                {!isBulkVerifying && verifyProgress && <span className="badge badge-success">Last run complete</span>}
-              </div>
-              <div className="progress-bar" style={{ marginBottom: '8px' }}>
-                <div
-                  className="progress-fill"
-                  style={{
-                    width: `${verifyProgress ? Math.round(((verifyProgress.current || 0) / Math.max(verifyProgress.total || 1, 1)) * 100) : 0}%`,
-                    background: isVerifyPaused ? 'var(--warning)' : undefined
-                  }}
-                />
-              </div>
-              <div className="flex justify-between text-sm text-muted">
-                <span>{verifyProgress ? `${verifyProgress.current || 0} of ${verifyProgress.total || 0} checked` : 'Ready for verification'}</span>
-                <span>{verifyProgress ? `${Math.round(((verifyProgress.current || 0) / Math.max(verifyProgress.total || 1, 1)) * 100)}%` : '0%'}</span>
-              </div>
-              {verifyProgress?.email && (
-                <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--text-muted)' }}>
-                  Checking <strong style={{ color: 'var(--text)' }}>{verifyProgress.email}</strong>
-                </div>
-              )}
-            </div>
-
-            {isBulkVerifying && (
-              <div className="flex gap-2">
-                {!isVerifyPaused ? (
-                  <button className="btn btn-outline btn-sm" onClick={handlePauseVerify}>
-                    <Pause size={14} /> Pause
-                  </button>
-                ) : (
-                  <button className="btn btn-outline btn-sm" onClick={handleResumeVerify}>
-                    <Play size={14} /> Resume
-                  </button>
-                )}
-                <button className="btn btn-danger btn-sm" onClick={handleStopVerify}>
-                  <Square size={14} /> Stop
-                </button>
-              </div>
-            )}
-          </div>
-
-          {verifyLiveResults.length > 0 && (
-            <div style={{ marginTop: '14px', borderTop: '1px solid var(--border)', paddingTop: '14px' }}>
-              <div style={{ fontSize: '12px', fontWeight: 600, marginBottom: '8px', color: 'var(--text-secondary)' }}>Live Results</div>
-              <div style={{ display: 'grid', gap: '6px' }}>
-                {verifyLiveResults.slice(0, 8).map((result, index) => (
-                  <div
-                    key={`${result.email}-${index}`}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '8px',
-                      padding: '8px 10px',
-                      borderRadius: '8px',
-                      background: 'var(--bg-primary)',
-                      border: '1px solid var(--border)',
-                      fontSize: '12px'
-                    }}
-                  >
-                    {result.status === 'valid' ? <CheckCircle size={12} style={{ color: 'var(--success)' }} /> :
-                      result.status === 'invalid' ? <XCircle size={12} style={{ color: 'var(--error)' }} /> :
-                        <AlertTriangle size={12} style={{ color: 'var(--warning)' }} />}
-                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{result.email}</span>
-                    <span className={`badge badge-${result.status === 'valid' ? 'success' : result.status === 'invalid' ? 'error' : 'warning'}`}>
-                      {result.status}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Contacts Table */}
-      <div className="card">
-        {loading ? (
-          <div className="text-center text-muted" style={{ padding: '40px' }}>
-            <Loader2 size={24} style={{ animation: 'spin 1s linear infinite', marginBottom: '8px' }} />
-            <p>Loading contacts...</p>
-          </div>
-        ) : contacts.length === 0 ? (
-          <div className="empty-state">
-            <Users className="empty-state-icon" />
-            <h3 className="empty-state-title">No contacts found</h3>
-            <p className="empty-state-text">Import contacts or add them manually.</p>
-            <button className="btn btn-primary" onClick={() => handleOpenModal()}><Plus size={16} /> Add Contact</button>
-          </div>
-        ) : (
-          <div className="table-container">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th style={{ width: '40px' }}>
-                    <input
-                      type="checkbox"
-                      checked={selectedContacts.length === contacts.length && contacts.length > 0}
-                      onChange={toggleSelectAll}
-                    />
-                  </th>
-                  <th onClick={() => handleSort('email')} style={{ cursor: 'pointer', userSelect: 'none' }}>
-                    <span className="flex items-center gap-1">Email {getSortIcon('email')}</span>
-                  </th>
-                  <th onClick={() => handleSort('firstName')} style={{ cursor: 'pointer', userSelect: 'none' }}>
-                    <span className="flex items-center gap-1">Name {getSortIcon('firstName')}</span>
-                  </th>
-                  <th>Company</th>
-                  <th>List</th>
-                  <th>Status</th>
-                  <th onClick={() => handleSort('engagementScore')} style={{ cursor: 'pointer', userSelect: 'none' }}>
-                    <span className="flex items-center gap-1">Engagement {getSortIcon('engagementScore')}</span>
-                  </th>
-                  <th style={{ width: '80px' }}>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {contacts.map(contact => {
-                  const displayName = getDisplayName(contact);
-                  const engScore = contact.engagementScore || 0;
-
-                  return (
-                    <tr key={contact.id}>
-                      <td>
-                        <input
-                          type="checkbox"
-                          checked={selectedContacts.includes(contact.id)}
-                          onChange={() => toggleSelect(contact.id)}
-                        />
-                      </td>
-                      <td>
-                        <strong
-                          style={{ cursor: 'pointer', color: 'var(--accent)' }}
-                          onClick={() => handleViewDetail(contact)}
-                        >
-                          {contact.email}
-                        </strong>
-                      </td>
-                      <td>{displayName || <span className="text-muted">-</span>}</td>
-                      <td>{contact.company || '-'}</td>
-                      <td>{getListLabel(contact) || <span className="text-muted">No list</span>}</td>
-                      <td>{getVerificationBadge(contact)}</td>
-                      <td>
-                        <div className="flex items-center gap-2">
-                          <div style={{
-                            width: '50px',
-                            height: '6px',
-                            background: 'var(--bg-tertiary)',
-                            borderRadius: '3px',
-                            overflow: 'hidden'
-                          }}>
-                            <div style={{
-                              width: `${Math.min(engScore, 100)}%`,
-                              height: '100%',
-                              background: getEngagementColor(engScore),
-                              borderRadius: '3px',
-                              transition: 'width 0.3s'
-                            }} />
-                          </div>
-                          <span style={{
-                            fontSize: '12px',
-                            fontWeight: 500,
-                            color: getEngagementColor(engScore),
-                            minWidth: '24px'
-                          }}>
-                            {engScore}
-                          </span>
-                        </div>
-                      </td>
-                      <td>
-                        <div className="flex gap-1">
-                          <button
-                            className="btn btn-outline btn-icon btn-sm"
-                            onClick={() => handleVerifyContact(contact)}
-                            title="Verify"
-                            disabled={isBulkVerifying || verifyingContactId === contact.id}
-                          >
-                            {verifyingContactId === contact.id ? <Loader2 size={14} className="animate-spin" /> : <BadgeCheck size={14} />}
-                          </button>
-                          <button
-                            className="btn btn-outline btn-icon btn-sm"
-                            onClick={() => handleViewDetail(contact)}
-                            title="View"
-                          >
-                            <Eye size={14} />
-                          </button>
-                          <button
-                            className="btn btn-outline btn-icon btn-sm"
-                            onClick={() => handleOpenModal(contact)}
-                            title="Edit"
-                          >
-                            <Edit2 size={14} />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {/* Pagination */}
-        <div className="flex justify-between items-center mt-4" style={{ padding: '0 4px' }}>
-          <div className="flex items-center gap-3">
-            <span className="text-sm text-muted">
-              Showing {contacts.length > 0 ? ((pagination.page - 1) * pagination.perPage + 1) : 0}-{Math.min(pagination.page * pagination.perPage, pagination.totalCount)} of {(pagination.totalCount || 0).toLocaleString()} contacts
-            </span>
-            <select
-              className="form-select"
-              style={{ width: '80px', padding: '4px 8px', fontSize: '12px' }}
-              value={pagination.perPage}
-              onChange={(e) => setPagination(prev => ({ ...prev, perPage: parseInt(e.target.value), page: 1 }))}
-            >
-              <option value={25}>25</option>
-              <option value={50}>50</option>
-              <option value={100}>100</option>
-            </select>
-            <span className="text-sm text-muted">per page</span>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              className="btn btn-outline btn-sm"
-              disabled={pagination.page <= 1}
-              onClick={() => setPagination(prev => ({ ...prev, page: 1 }))}
-              title="First page"
-            >
-              <ChevronLeft size={14} /><ChevronLeft size={14} style={{ marginLeft: '-8px' }} />
-            </button>
-            <button
-              className="btn btn-outline btn-sm"
-              disabled={pagination.page <= 1}
-              onClick={() => setPagination(prev => ({ ...prev, page: prev.page - 1 }))}
-            >
-              <ChevronLeft size={14} />
-            </button>
-            <span className="text-sm" style={{ padding: '0 8px', fontWeight: 500 }}>
-              Page {pagination.page} of {pagination.totalPages}
-            </span>
-            <button
-              className="btn btn-outline btn-sm"
-              disabled={pagination.page >= pagination.totalPages}
-              onClick={() => setPagination(prev => ({ ...prev, page: prev.page + 1 }))}
-            >
-              <ChevronRight size={14} />
-            </button>
-            <button
-              className="btn btn-outline btn-sm"
-              disabled={pagination.page >= pagination.totalPages}
-              onClick={() => setPagination(prev => ({ ...prev, page: prev.totalPages }))}
-              title="Last page"
-            >
-              <ChevronRight size={14} /><ChevronRight size={14} style={{ marginLeft: '-8px' }} />
-            </button>
-          </div>
-        </div>
-      </div>
+      <ContactsTableCard
+        loading={loading}
+        contacts={contacts}
+        selectedContacts={selectedContacts}
+        toggleSelectAll={toggleSelectAll}
+        toggleSelect={toggleSelect}
+        handleSort={handleSort}
+        getSortIcon={getSortIcon}
+        getDisplayName={getDisplayName}
+        getListLabel={getListLabel}
+        getVerificationBadge={getVerificationBadge}
+        getEngagementColor={getEngagementColor}
+        handleVerifyContact={handleVerifyContact}
+        isBulkVerifying={isBulkVerifying}
+        verifyingContactId={verifyingContactId}
+        handleViewDetail={handleViewDetail}
+        handleOpenModal={handleOpenModal}
+        pagination={pagination}
+        setPagination={setPagination}
+      />
 
       {/* Add/Edit Contact Modal */}
-      <Modal isOpen={showModal} onClose={() => setShowModal(false)} title={editingContact ? 'Edit Contact' : 'Add Contact'}
-        footer={<><button className="btn btn-secondary" onClick={() => setShowModal(false)}>Cancel</button><button className="btn btn-primary" onClick={handleSave}>Save</button></>}>
+      <Modal
+        key={editingContact?.id || 'new'}
+        isOpen={showModal}
+        onClose={closeContactModal}
+        title={editingContact ? 'Edit Contact' : 'Add Contact'}
+        footer={<><button className="btn btn-secondary" onClick={closeContactModal}>Cancel</button><button className="btn btn-primary" onClick={handleSave}>Save</button></>}
+      >
         <div className="form-row">
           <div className="form-group">
             <label className="form-label">Email *</label>
@@ -1276,39 +1081,41 @@ function Contacts({ isActive }) {
         </div>
 
         {/* Tag selector */}
-        {tags.length > 0 && (
-          <div className="form-group">
-            <label className="form-label">Tags</label>
-            <div className="flex flex-wrap gap-2">
-              {tags.map(tag => {
-                const isSelected = formData.tags.includes(tag.id);
-                return (
-                  <span
-                    key={tag.id}
-                    onClick={() => {
-                      setFormData(prev => ({
-                        ...prev,
-                        tags: isSelected ? prev.tags.filter(t => t !== tag.id) : [...prev.tags, tag.id]
-                      }));
-                    }}
-                    style={{
-                      padding: '4px 10px',
-                      borderRadius: '12px',
-                      fontSize: '12px',
-                      cursor: 'pointer',
-                      background: isSelected ? tag.color + '30' : 'var(--bg-tertiary)',
-                      color: isSelected ? tag.color : 'var(--text-muted)',
-                      border: `1px solid ${isSelected ? tag.color : 'var(--border)'}`,
-                      transition: 'all 0.15s'
-                    }}
-                  >
-                    {tag.name}
-                  </span>
-                );
-              })}
-            </div>
+        <div className="form-group">
+          <label className="form-label">Tags <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 400 }}>(click to toggle)</span></label>
+          <div className="flex flex-wrap gap-2" style={{ minHeight: '32px' }}>
+            {tags.length > 0 ? tags.map(tag => {
+              const isSelected = formData.tags.includes(tag.id);
+              return (
+                <span
+                  key={tag.id}
+                  onClick={() => {
+                    setFormData(prev => ({
+                      ...prev,
+                      tags: isSelected ? prev.tags.filter(t => t !== tag.id) : [...prev.tags, tag.id]
+                    }));
+                  }}
+                  style={{
+                    padding: '4px 10px',
+                    borderRadius: '12px',
+                    fontSize: '12px',
+                    cursor: 'pointer',
+                    background: isSelected ? tag.color + '30' : 'var(--bg-tertiary)',
+                    color: isSelected ? tag.color : 'var(--text-muted)',
+                    border: `1px solid ${isSelected ? tag.color : 'var(--border)'}`,
+                    transition: 'all 0.15s'
+                  }}
+                >
+                  {tag.name}
+                </span>
+              );
+            }) : (
+              <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                No tags yet — create tags from the Tags button above the table.
+              </span>
+            )}
           </div>
-        )}
+        </div>
       </Modal>
 
       {/* Import Column Mapping Preview Modal */}
@@ -1427,14 +1234,42 @@ function Contacts({ isActive }) {
       </Modal>
 
       {/* Import Modal */}
-      <Modal isOpen={showImportModal} onClose={() => { setShowImportModal(false); setImportProgress(null); }} title="Import Contacts" size="lg"
-        footer={<><button className="btn btn-secondary" onClick={() => { setShowImportModal(false); setImportProgress(null); }}>Cancel</button><button className="btn btn-primary" onClick={confirmImport} disabled={!!importProgress}>
+      <Modal isOpen={showImportModal} onClose={() => { setShowImportModal(false); setImportProgress(null); setImportData(EMPTY_IMPORT_DATA); }} title="Import Contacts" size="lg"
+        footer={<><button className="btn btn-secondary" onClick={() => { setShowImportModal(false); setImportProgress(null); setImportData(EMPTY_IMPORT_DATA); }}>Cancel</button><button className="btn btn-primary" onClick={confirmImport} disabled={!!importProgress || importData.contacts.length === 0}>
           {importProgress ? `Importing... ${importProgress.current}/${importProgress.total}` : `Import ${importData.contacts.length} Contacts`}
         </button></>}>
         <div className="mb-4" style={{ padding: '12px', background: 'var(--bg-tertiary)', borderRadius: '8px' }}>
-          <p style={{ margin: 0 }}><strong><CheckCircle size={14} style={{ color: 'var(--success)', marginRight: '6px' }} />Found {importData.contacts.length} valid email addresses</strong></p>
-          <p className="text-sm text-muted" style={{ margin: '8px 0 0 0' }}>Review the data below before importing. Names and company info are automatically detected from column headers.</p>
+          <p style={{ margin: 0 }}><strong><CheckCircle size={14} style={{ color: 'var(--success)', marginRight: '6px' }} />{importData.summary?.readyToImport ?? importData.contacts.length} contact(s) ready to import</strong></p>
+          <p className="text-sm text-muted" style={{ margin: '8px 0 0 0' }}>This stage has already validated email format, removed file duplicates, and filtered out contacts that already exist in Bulky.</p>
         </div>
+
+        {importData.summary && (
+          <div className="stats-grid stats-grid-4 mb-4">
+            {[
+              { label: 'Ready', value: importData.summary.readyToImport || 0, color: 'var(--success)' },
+              { label: 'Existing Duplicates', value: importData.summary.existingDuplicates || 0, color: 'var(--warning)' },
+              { label: 'File Duplicates', value: importData.summary.duplicateInFile || 0, color: '#5bb4d4' },
+              { label: 'Invalid or Blank', value: (importData.summary.invalidEmails || 0) + (importData.summary.blankEmailRows || 0), color: 'var(--error)' }
+            ].map((item) => (
+              <div key={item.label} className="stat-card" style={{ padding: '14px 16px' }}>
+                <div className="stat-content" style={{ textAlign: 'center' }}>
+                  <div className="stat-value" style={{ fontSize: '22px', color: item.color }}>{item.value.toLocaleString()}</div>
+                  <div className="stat-label">{item.label}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {importData.listId && (() => {
+          const selectedImportList = lists.find((list) => list.id === importData.listId);
+          if (!selectedImportList) return null;
+          return (
+            <div className="mb-4 text-sm text-muted">
+              New contacts will be added to <strong style={{ color: 'var(--text)' }}>{selectedImportList.name}</strong>.
+            </div>
+          );
+        })()}
 
         {importProgress && (
           <div className="mb-4">
@@ -1461,12 +1296,82 @@ function Contacts({ isActive }) {
           <table className="table">
             <thead><tr><th>Email</th><th>First Name</th><th>Last Name</th><th>Company</th></tr></thead>
             <tbody>
-              {importData.contacts.slice(0, 100).map((c, i) => (
+              {(importData.sampleContacts.length > 0 ? importData.sampleContacts : importData.contacts.slice(0, 100)).map((c, i) => (
                 <tr key={i}><td>{c.email}</td><td>{c.firstName || '-'}</td><td>{c.lastName || '-'}</td><td>{c.company || '-'}</td></tr>
               ))}
             </tbody>
           </table>
           {importData.contacts.length > 100 && <p className="text-muted text-center mt-2">...and {importData.contacts.length - 100} more</p>}
+        </div>
+      </Modal>
+
+      {/* List Management Modal */}
+      <Modal isOpen={showListModal} onClose={() => setShowListModal(false)} title="Manage Lists"
+        footer={<button className="btn btn-secondary" onClick={() => setShowListModal(false)}>Close</button>}>
+        <div className="form-row" style={{ alignItems: 'end' }}>
+          <div className="form-group" style={{ flex: 1 }}>
+            <label className="form-label">List Name</label>
+            <input
+              type="text"
+              className="form-input"
+              placeholder="Newsletter Subscribers"
+              value={newList.name}
+              onChange={(e) => setNewList((prev) => ({ ...prev, name: e.target.value }))}
+              onKeyDown={(e) => e.key === 'Enter' && handleAddList()}
+            />
+          </div>
+          <div className="form-group" style={{ flex: 1 }}>
+            <label className="form-label">Description</label>
+            <input
+              type="text"
+              className="form-input"
+              placeholder="Optional description"
+              value={newList.description}
+              onChange={(e) => setNewList((prev) => ({ ...prev, description: e.target.value }))}
+            />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Color</label>
+            <input
+              type="color"
+              value={newList.color}
+              onChange={(e) => setNewList((prev) => ({ ...prev, color: e.target.value }))}
+              style={{ width: '50px', height: '40px', border: 'none', cursor: 'pointer' }}
+            />
+          </div>
+          <button className="btn btn-primary" onClick={handleAddList}>
+            <Plus size={16} /> Add
+          </button>
+        </div>
+
+        <div style={{ display: 'grid', gap: '10px' }}>
+          {lists.map((list) => (
+            <div
+              key={list.id}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '12px',
+                padding: '12px 14px',
+                background: 'var(--bg-tertiary)',
+                borderRadius: '10px',
+                border: '1px solid var(--border)'
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                  <span style={{ width: '10px', height: '10px', borderRadius: '999px', background: list.color || 'var(--accent)' }} />
+                  <strong>{list.name}</strong>
+                </div>
+                <div className="text-sm text-muted">{list.description || 'No description'}</div>
+              </div>
+              <button className="btn btn-outline btn-sm" onClick={() => handleDeleteList(list.id)}>
+                <Trash2 size={14} /> Delete
+              </button>
+            </div>
+          ))}
+          {lists.length === 0 && <p className="text-muted">No contact lists yet. Add one above to start organizing contacts.</p>}
         </div>
       </Modal>
 
@@ -1482,10 +1387,38 @@ function Contacts({ isActive }) {
           {tags.map(tag => (
             <span key={tag.id} className="badge" style={{ background: tag.color + '20', color: tag.color, border: `1px solid ${tag.color}` }}>
               {tag.name}
-              <button onClick={async () => { await window.electron.tags.delete(tag.id); loadTags(); }} style={{ marginLeft: '8px', background: 'none', border: 'none', cursor: 'pointer', color: 'inherit' }}>x</button>
+              <button onClick={async () => { await window.electron.tags.delete(tag.id); refreshContactsSurface(); }} style={{ marginLeft: '8px', background: 'none', border: 'none', cursor: 'pointer', color: 'inherit' }}>x</button>
             </span>
           ))}
           {tags.length === 0 && <p className="text-muted">No tags created yet</p>}
+        </div>
+      </Modal>
+
+      {/* Bulk Add to List Modal */}
+      <Modal isOpen={showBulkListModal} onClose={() => setShowBulkListModal(false)} title={`Add ${selectedContacts.length} Contacts to List`}
+        footer={<button className="btn btn-secondary" onClick={() => setShowBulkListModal(false)}>Cancel</button>}>
+        <p className="text-muted mb-4">Select a list to add {selectedContacts.length} selected contact(s) to:</p>
+        <div style={{ display: 'grid', gap: '10px' }}>
+          {lists.map(list => (
+            <button
+              key={list.id}
+              className="btn btn-outline"
+              style={{ justifyContent: 'flex-start', gap: '10px', padding: '12px 16px' }}
+              onClick={() => handleBulkAddToList(list.id)}
+            >
+              <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: list.color || 'var(--accent)', flexShrink: 0 }} />
+              <span style={{ fontWeight: 500 }}>{list.name}</span>
+              {list.description && <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{list.description}</span>}
+            </button>
+          ))}
+          {lists.length === 0 && (
+            <div className="text-muted">
+              <p>No lists available. Create a list first.</p>
+              <button className="btn btn-outline btn-sm mt-2" onClick={() => { setShowBulkListModal(false); setShowListModal(true); }}>
+                <Plus size={14} /> Create List
+              </button>
+            </div>
+          )}
         </div>
       </Modal>
 

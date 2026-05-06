@@ -447,7 +447,7 @@ class SpamService {
       });
     }
 
-    // List-Unsubscribe header is auto-added by Bulky for all campaign sends — no suggestion needed
+    // List-Unsubscribe header is auto-added by Bulky for all campaign sends -- no suggestion needed
 
     // Check for missing physical address (CAN-SPAM)
     const hasAddress = contentLower.includes('address') || contentLower.includes('street') ||

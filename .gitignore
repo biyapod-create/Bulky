@@ -6,6 +6,7 @@ renderer/node_modules/
 dist/
 dist-release-*/
 renderer/build/
+extracted_asar/
 
 # Environment and local files
 .env
@@ -32,9 +33,12 @@ temp_*.b64
 
 # Smoke and local runtime data
 .smoke-userdata/
+.smoke-userdata-debug/
 .smoke-userdata-qa/
 *.db-shm
 *.db-wal
+NVIDIA Corporation/
+tools/css-maintenance/archive/
 
 # Tooling folders
 .claude/

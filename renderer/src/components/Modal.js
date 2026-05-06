@@ -1,60 +1,73 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef, useCallback } from 'react';
 import { X } from 'lucide-react';
 
-function Modal({ isOpen, onClose, title, children, footer, size = 'md' }) {
+/**
+ * Modal — animated, focus-trapped, accessible
+ * Sizes: sm(400) | md(520) | lg(720) | xl(940) | full(98vw)
+ */
+function Modal({ isOpen, onClose, title, children, footer, size = 'md', danger = false }) {
+  const overlayRef = useRef(null);
+
+  const sizeMap = { sm: '400px', md: '520px', lg: '720px', xl: '940px', full: 'min(98vw, 1200px)' };
+  const maxWidth = sizeMap[size] ?? sizeMap.md;
+
+  /* Focus trap */
+  const trapFocus = useCallback((e) => {
+    if (e.key !== 'Tab') return;
+    const modal = overlayRef.current?.querySelector('.modal');
+    if (!modal) return;
+    const focusable = modal.querySelectorAll(
+      'button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'
+    );
+    const first = focusable[0];
+    const last  = focusable[focusable.length - 1];
+    if (e.shiftKey) { if (document.activeElement === first) { e.preventDefault(); last?.focus(); } }
+    else             { if (document.activeElement === last)  { e.preventDefault(); first?.focus(); } }
+  }, []);
+
   useEffect(() => {
-    if (!isOpen) return undefined;
-
-    const handleKeyDown = (event) => {
-      if (event.key === 'Escape') {
-        onClose?.();
-      }
+    if (!isOpen) return;
+    const prevFocus = document.activeElement;
+    const handler = (e) => { if (e.key === 'Escape') onClose?.(); };
+    document.addEventListener('keydown', handler);
+    document.addEventListener('keydown', trapFocus);
+    /* Focus first focusable element */
+    setTimeout(() => {
+      const modal = overlayRef.current?.querySelector('.modal');
+      const first = modal?.querySelector('button,input,select,textarea,[tabindex]');
+      first?.focus();
+    }, 80);
+    return () => {
+      document.removeEventListener('keydown', handler);
+      document.removeEventListener('keydown', trapFocus);
+      prevFocus?.focus?.();
     };
-
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
+  }, [isOpen, onClose, trapFocus]);
 
   if (!isOpen) return null;
 
-  // Support both shorthand (lg) and full names (large)
-  const sizeMap = {
-    sm: '400px',
-    small: '400px',
-    md: '500px',
-    medium: '500px',
-    lg: '700px',
-    large: '700px',
-    xl: '900px',
-    xlarge: '900px',
-  };
-
-  const width = sizeMap[size] || sizeMap.md;
-
   return (
-    <div className="modal-overlay" onClick={onClose} role="presentation">
-      <div 
-        className="modal" 
-        style={{ maxWidth: width }}
+    <div
+      ref={overlayRef}
+      className={`modal-overlay ${isOpen ? 'modal-overlay--open' : ''}`}
+      role="presentation"
+      onClick={(e) => { if (e.target === overlayRef.current) onClose?.(); }}
+    >
+      <div
+        className={`modal modal--animated ${danger ? 'modal--danger' : ''}`}
+        style={{ maxWidth }}
         role="dialog"
         aria-modal="true"
-        aria-label={title}
-        onClick={e => e.stopPropagation()}
+        aria-labelledby="modal-title"
       >
         <div className="modal-header">
-          <h3 className="modal-title">{title}</h3>
-          <button className="modal-close" onClick={onClose}>
-            <X size={20} />
+          <h3 className="modal-title" id="modal-title">{title}</h3>
+          <button className="modal-close" onClick={onClose} aria-label="Close">
+            <X size={18} />
           </button>
         </div>
-        <div className="modal-body">
-          {children}
-        </div>
-        {footer && (
-          <div className="modal-footer">
-            {footer}
-          </div>
-        )}
+        <div className="modal-body">{children}</div>
+        {footer && <div className="modal-footer">{footer}</div>}
       </div>
     </div>
   );

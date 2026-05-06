@@ -1,5 +1,6 @@
 ﻿const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
+const { screen } = require('electron');
 const fs = require('fs');
 const http = require('http');
 const crypto = require('crypto');
@@ -15,16 +16,16 @@ const AIService = require('./services/aiService');
 const Logger = require('./services/logger');
 const ServiceManager = require('./services/serviceManager');
 const CrashReporter = require('./services/crashReporter');
-const registerBackupHandlers = require('./ipc/registerBackupHandlers');
-const registerCampaignHandlers = require('./ipc/registerCampaignHandlers');
-const registerContactsHandlers = require('./ipc/registerContactsHandlers');
-const registerContentHandlers = require('./ipc/registerContentHandlers');
-const registerDataHandlers = require('./ipc/registerDataHandlers');
-const registerMessagingHandlers = require('./ipc/registerMessagingHandlers');
-const registerOperationsHandlers = require('./ipc/registerOperationsHandlers');
-const registerSmtpHandlers = require('./ipc/registerSmtpHandlers');
-const registerSettingsHandlers = require('./ipc/registerSettingsHandlers');
-const registerSupportHandlers = require('./ipc/registerSupportHandlers');
+const CloudConfigService = require('./services/cloudConfigService');
+const { EntitlementService } = require('./services/entitlementService');
+const DesktopAccountService = require('./services/desktopAccountService');
+const HybridCloudService = require('./services/hybridCloudService');
+const SyncService = require('./services/syncService');
+const { createWindow: createAppWindow, createTray: createAppTray } = require('./main-process/windowShell');
+const { registerAllHandlers: registerAppHandlers } = require('./main-process/handlerRegistry');
+const AutomationEngine = require('./services/automationEngine');
+const DripEngine = require('./services/dripEngine');
+const { autoUpdater } = require('electron-updater');
 
 // ============================================================
 // Process-level crash handlers with auto-recovery
@@ -180,8 +181,15 @@ let domainHealthService = null;
 let aiService = null;
 let logger = null;
 let serviceManager = null;
+let entitlementService = null;
+let cloudConfigService = null;
+let desktopAccountService = null;
+let hybridCloudService = null;
+let syncService = null;
 let trackingServer = null;
 let scheduledCampaignTimers = new Map();
+let automationEngine = null;
+let dripEngine = null;
 
 const configuredUserDataPath = process.env.BULKY_USER_DATA_DIR
   ? path.resolve(process.env.BULKY_USER_DATA_DIR)
@@ -249,10 +257,48 @@ function getLocalTrackingBaseUrl() {
   return `http://127.0.0.1:${port}`;
 }
 
+function canUseHostedTracking() {
+  return !!(
+    desktopAccountService?.getStatus?.()?.authenticated &&
+    entitlementService?.hasCapability?.('hostedTracking')
+  );
+}
+
+function getConfiguredPublicTrackingBaseUrl(settings = null) {
+  const cloudConfiguredBaseUrl = normalizeTrackingDomain(
+    cloudConfigService?.getInternalConfig?.()?.trackingBaseUrl || ''
+  );
+  if (cloudConfiguredBaseUrl && canUseHostedTracking()) {
+    return {
+      baseUrl: cloudConfiguredBaseUrl,
+      source: 'cloud-config'
+    };
+  }
+
+  const deliverabilitySettings = settings ?? getDeliverabilitySettings();
+  const configuredDomainBaseUrl = normalizeTrackingDomain(deliverabilitySettings?.trackingDomain);
+  if (configuredDomainBaseUrl) {
+    return {
+      baseUrl: configuredDomainBaseUrl,
+      source: 'deliverability'
+    };
+  }
+
+  return {
+    baseUrl: '',
+    source: 'local'
+  };
+}
+
+function getCurrentTrackingBaseUrl() {
+  const configured = getConfiguredPublicTrackingBaseUrl();
+  return configured.baseUrl || getLocalTrackingBaseUrl();
+}
+
 function syncTrackingBaseUrl(settings = null) {
   const resolved = settings ?? getDeliverabilitySettings();
-  const trackingDomain = resolved?.trackingDomain;
-  const baseUrl = normalizeTrackingDomain(trackingDomain) || getLocalTrackingBaseUrl();
+  const configured = getConfiguredPublicTrackingBaseUrl(resolved);
+  const baseUrl = configured.baseUrl || getLocalTrackingBaseUrl();
 
   if (emailService) {
     emailService.setTrackingBaseUrl(baseUrl);
@@ -269,6 +315,41 @@ function syncTrackingBaseUrl(settings = null) {
   }
 
   return baseUrl;
+}
+
+function syncPublicTrackingContext() {
+  const accountStatus = desktopAccountService?.getStatus?.() || {};
+  const ownerId = canUseHostedTracking()
+    ? String(accountStatus?.account?.id || '').trim()
+    : '';
+
+  if (emailService?.setPublicTrackingContext) {
+    emailService.setPublicTrackingContext({ ownerId });
+  }
+}
+
+function getEffectiveTrackingSigningSecret() {
+  const workspaceSecret = canUseHostedTracking()
+    ? String(desktopAccountService?.getTrackingWorkspaceSecret?.() || '').trim()
+    : '';
+
+  return workspaceSecret || hmacSecret;
+}
+
+function syncTrackingSigningSecret() {
+  const effectiveSecret = getEffectiveTrackingSigningSecret();
+  if (!effectiveSecret) {
+    return '';
+  }
+
+  if (emailService?.setHmacSecret) {
+    emailService.setHmacSecret(effectiveSecret);
+  }
+  if (trackingService?.setHmacSecret) {
+    trackingService.setHmacSecret(effectiveSecret);
+  }
+
+  return effectiveSecret;
 }
 
 function getConfiguredDkimSelectors(domain) {
@@ -311,166 +392,36 @@ function getPrimarySmtpAccount(activeOnly = false) {
 // Window
 // ============================================================
 function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 800,
-    minWidth: 960,
-    minHeight: 600,
-    frame: false,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false
-    },
-    icon: path.join(__dirname, 'assets', 'icon.ico'),
-    show: false
-  });
-
-  // Load renderer
-  const rendererPath = path.join(__dirname, 'renderer', 'build', 'index.html');
-  if (fs.existsSync(rendererPath)) {
-    mainWindow.loadFile(rendererPath);
-  } else {
-    // Dev mode fallback
-    mainWindow.loadURL('http://localhost:3000');
-  }
-
-  mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
-  });
-
-  // Minimize to tray on close instead of quitting
-  mainWindow.on('close', (event) => {
-    if (!app.isQuitting) {
-      event.preventDefault();
-      mainWindow.hide();
-      // One-time balloon hint so the user knows the app is still running
-      if (tray && !app._trayHintShown) {
-        app._trayHintShown = true;
-        try {
-          tray.displayBalloon({
-            iconType: 'info',
-            title: 'Bulky is still running',
-            content: 'Bulky is running in the background. Click the tray icon to reopen it.'
-          });
-        } catch (e) {}
-      }
+  mainWindow = createAppWindow({
+    BrowserWindow,
+    screen,
+    app,
+    fs,
+    path,
+    baseDir: __dirname,
+    getTray: () => tray,
+    onClosed: () => {
+      mainWindow = null;
     }
   });
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
-}
-
-// ============================================================
-// System Tray
-// ============================================================
-function getTrayIconPath() {
-  // In the packaged app the icon is copied to resources/ via extraResources.
-  // Electron cannot use nativeImage from inside an asar for Tray on Windows —
-  // it must point to a real file on disk.
-  const candidates = [
-    process.resourcesPath && path.join(process.resourcesPath, 'icon.ico'),
-    path.join(__dirname, 'assets', 'icon.ico'),
-    path.join(path.dirname(process.execPath), 'resources', 'icon.ico'),
-  ].filter(Boolean);
-
-  for (const p of candidates) {
-    try { if (fs.existsSync(p)) return p; } catch (e) {}
-  }
-  return null;
 }
 
 function createTray() {
-  const iconFilePath = getTrayIconPath();
-  let trayImage = null;
-
-  if (iconFilePath) {
-    try {
-      trayImage = nativeImage.createFromPath(iconFilePath);
-      // Windows system tray requires 16×16; resize ensures it's never blank.
-      if (!trayImage.isEmpty()) {
-        trayImage = trayImage.resize({ width: 16, height: 16 });
-      }
-    } catch (e) {
-      logger?.warn('Tray icon load failed', { error: e.message, path: iconFilePath });
-    }
-  }
-
-  // Fallback: a minimal 16×16 solid-colour PNG so the tray is never invisible.
-  if (!trayImage || trayImage.isEmpty()) {
-    // 1×1 PNG stretched to 16×16 (cyan-blue #5bb4d4) — valid PNG base64
-    const fallbackPng = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPj/HgAHggJ/PchI6QAAAABJRU5ErkJggg==';
-    try {
-      trayImage = nativeImage.createFromDataURL(fallbackPng);
-      trayImage = trayImage.resize({ width: 16, height: 16 });
-    } catch (e) {
-      trayImage = nativeImage.createEmpty();
-    }
-  }
-
-  tray = new Tray(trayImage);
-
-  const buildMenu = () => Menu.buildFromTemplate([
-    {
-      label: 'Open Bulky',
-      click: () => {
-        if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
-        else { createWindow(); }
-      }
-    },
-    {
-      label: 'Settings',
-      click: () => {
-        if (mainWindow) {
-          mainWindow.show();
-          mainWindow.focus();
-          // Tell the renderer to navigate to the Settings page
-          if (!mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('navigate:page', '/settings');
-          }
-        } else {
-          createWindow();
-        }
-      }
-    },
-    { type: 'separator' },
-    {
-      label: `Bulky v${APP_VERSION}`,
-      enabled: false   // informational label — grayed out
-    },
-    { type: 'separator' },
-    {
-      label: 'Quit Bulky',
-      click: () => {
-        app.isQuitting = true;
-        cleanup();
-        app.quit();
-      }
-    }
-  ]);
-
-  tray.setToolTip(`Bulky Email Sender v${APP_VERSION}`);
-  tray.setContextMenu(buildMenu());
-
-  // Single click → toggle window visibility
-  tray.on('click', () => {
-    if (!mainWindow) { createWindow(); return; }
-    if (mainWindow.isVisible() && !mainWindow.isMinimized()) {
-      mainWindow.hide();
-    } else {
-      mainWindow.show();
-      mainWindow.focus();
-    }
-  });
-
-  // Double-click always brings window to front
-  tray.on('double-click', () => {
-    if (!mainWindow) { createWindow(); return; }
-    mainWindow.show();
-    mainWindow.focus();
+  tray = createAppTray({
+    Tray,
+    Menu,
+    nativeImage,
+    app,
+    fs,
+    path,
+    baseDir: __dirname,
+    resourcesPath: process.resourcesPath,
+    execPath: process.execPath,
+    logger,
+    appVersion: APP_VERSION,
+    getMainWindow: () => mainWindow,
+    openWindow: createWindow,
+    cleanup
   });
 }
 
@@ -486,10 +437,50 @@ async function initializeServices() {
   db = new Database(dbPath);
   await db.initialize();
   logger.info('Database initialized');
+  entitlementService = new EntitlementService(db, { appVersion: APP_VERSION });
+  cloudConfigService = new CloudConfigService(db, {
+    encryptValue: encryptPassword,
+    decryptValue: decryptPassword
+  });
+  desktopAccountService = new DesktopAccountService({
+    db,
+    cloudConfigService,
+    entitlementService,
+    encryptValue: encryptPassword,
+    decryptValue: decryptPassword,
+    logger,
+    appVersion: APP_VERSION
+  });
+  await desktopAccountService.initialize();
+  syncService = new SyncService({
+    desktopAccountService,
+    entitlementService,
+    logger
+  });
+  desktopAccountService.setStatusListener(() => {
+    syncTrackingSigningSecret();
+    syncPublicTrackingContext();
+    syncTrackingBaseUrl();
+    syncService?.refresh?.().catch((error) => {
+      logger?.warn?.('Realtime sync refresh after account change failed', { error: error.message });
+    });
+  });
+  await syncService.refresh();
+  hybridCloudService = new HybridCloudService({
+    cloudConfigService,
+    desktopAccountService,
+    entitlementService,
+    syncService,
+    logger,
+    appVersion: APP_VERSION
+  });
 
   // Load or generate HMAC secret (encrypted for security)
+  const envTrackingSigningSecret = String(process.env.BULKY_TRACKING_SIGNING_SECRET || '').trim();
   const storedHmacSecret = db.getSetting('hmac_secret');
-  if (!storedHmacSecret) {
+  if (envTrackingSigningSecret) {
+    hmacSecret = envTrackingSigningSecret;
+  } else if (!storedHmacSecret) {
     hmacSecret = crypto.randomBytes(32).toString('hex');
     db.setSetting('hmac_secret', encryptPassword(hmacSecret));
   } else {
@@ -514,7 +505,9 @@ async function initializeServices() {
   serviceManager.registerService('TrackingService', trackingService);
 
   domainHealthService = new DomainHealthService();
+  syncTrackingSigningSecret();
   syncTrackingBaseUrl(deliverabilitySettings);
+  syncPublicTrackingContext();
 
   // Restore persisted sending-mode and company address so they survive restarts.
   // Without this, emailService always boots with 'bulk' / '' regardless of saved settings.
@@ -539,10 +532,25 @@ async function initializeServices() {
     } catch (e) {}
   }
 
+  automationEngine = new AutomationEngine({
+    db,
+    emailService,
+    decryptSmtpAccount,
+    logger
+  });
+
+  dripEngine = new DripEngine({
+    db,
+    emailService,
+    decryptSmtpAccount,
+    logger
+  });
+
   startTrackingServer();
   loadScheduledCampaigns();
   resumeInterruptedCampaigns();
   startRetryProcessor();
+  startDripProcessor();
   startAutoBackup();
   startMemoryMonitor();
   startServiceHealthMonitor();
@@ -665,6 +673,20 @@ function startRetryProcessor() {
 }
 
 // ============================================================
+// Drip processor — advances per-contact drip step queue
+// ============================================================
+let dripInterval;
+function startDripProcessor() {
+  dripInterval = setInterval(async () => {
+    try {
+      await dripEngine?.tick?.();
+    } catch (e) {
+      logger?.warn('Drip processor error', { error: e.message });
+    }
+  }, 60000);
+}
+
+// ============================================================
 // Auto-backup
 // ============================================================
 let autoBackupInterval;
@@ -759,10 +781,9 @@ function startTrackingServer() {
       const [, campaignId, contactId, trackingId] = openMatch;
       try {
         await trackingService.recordOpen(campaignId, contactId, trackingId, metadata);
-        // Push update to renderer immediately — Dashboard and Analytics pages
-        // subscribe to this event so open counts appear without waiting for the
-        // next poll cycle.
         notifyDataChanged('campaigns', { source: 'tracking', event: 'open', campaignId });
+        notifyDataChanged('tracking', { source: 'tracking', event: 'open', campaignId });
+        automationEngine?.fire?.('email_opened', { campaignId, contactId, email: '' }).catch(() => {});
       } catch (e) {}
       const pixel = trackingService.getTrackingPixelBuffer();
       res.writeHead(200, {
@@ -783,8 +804,9 @@ function startTrackingServer() {
       const redirectUrl = parsedUrl.searchParams.get('url');
       try {
         await trackingService.recordClick(campaignId, contactId, trackingId, redirectUrl, metadata);
-        // Same as open tracking — push immediately so click counts update live.
         notifyDataChanged('campaigns', { source: 'tracking', event: 'click', campaignId });
+        notifyDataChanged('tracking', { source: 'tracking', event: 'click', campaignId });
+        automationEngine?.fire?.('link_clicked', { campaignId, contactId, email: '', linkUrl: redirectUrl }).catch(() => {});
       } catch (e) {}
       if (redirectUrl) {
         try {
@@ -814,6 +836,154 @@ function startTrackingServer() {
       res.end(html);
       if (result.success && mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('tracking:unsubscribe', { email, campaignId });
+      }
+      if (result.success) {
+        notifyDataChanged('campaigns', { source: 'tracking', event: 'unsubscribe', campaignId, email });
+        notifyDataChanged('tracking', { source: 'tracking', event: 'unsubscribe', campaignId, email });
+      }
+      return;
+    }
+
+    const formSubmitMatch = pathname.match(/^\/api\/form\/submit\/([^/]+)$/);
+    if (formSubmitMatch && req.method === 'POST') {
+      const [, formId] = formSubmitMatch;
+
+      try {
+        const form = db.getSignupForm(formId);
+        if (!form || !form.isActive) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Signup form not found or inactive' }));
+          return;
+        }
+
+        const payload = await readJsonRequestBody(req);
+        const fields = parseSignupFormFields(form);
+        const email = String(extractSignupField(payload, ['email'])).toLowerCase();
+        if (!email || !emailService?.validateEmail?.(email)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'A valid email address is required' }));
+          return;
+        }
+
+        const requiredFields = fields
+          .filter((field) => field?.required)
+          .map((field) => String(field.name || '').trim())
+          .filter(Boolean);
+        const missingField = requiredFields.find((fieldName) => !String(payload?.[fieldName] || '').trim());
+        if (missingField) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `${missingField} is required` }));
+          return;
+        }
+
+        const submissionId = db.addFormSubmission({
+          formId,
+          email,
+          data: payload,
+          status: form.doubleOptin ? 'pending' : 'confirmed',
+          confirmedAt: form.doubleOptin ? '' : new Date().toISOString()
+        });
+
+        if (form.doubleOptin) {
+          await sendDoubleOptInEmail(form, submissionId, payload);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: true,
+            message: 'Please confirm your subscription from the email we just sent.'
+          }));
+          return;
+        }
+
+        upsertContactFromSignupForm(form, payload, submissionId);
+        notifyDataChanged('contacts', { source: 'signup-form', formId });
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          success: true,
+          message: String(form.successMessage || 'Thank you for subscribing!'),
+          redirectUrl: String(form.redirectUrl || '').trim()
+        }));
+      } catch (error) {
+        logger?.error('Signup form submission failed', {
+          formId,
+          error: error.message
+        });
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: error.message || 'Form submission failed' }));
+      }
+      return;
+    }
+
+    const formConfirmMatch = pathname.match(/^\/confirm-subscription\/([^/]+)$/);
+    if (formConfirmMatch && req.method === 'GET') {
+      const [, submissionId] = formConfirmMatch;
+      const email = String(parsedUrl.searchParams.get('email') || '').toLowerCase();
+      const formId = parsedUrl.searchParams.get('formId');
+      const token = parsedUrl.searchParams.get('token');
+
+      try {
+        const submission = db._get('SELECT * FROM form_submissions WHERE id = ?', [submissionId]);
+        if (!submission) {
+          res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(renderSignupConfirmationPage({
+            success: false,
+            title: 'Subscription not found',
+            message: 'This confirmation link is no longer valid.'
+          }));
+          return;
+        }
+
+        if (!verifyFormConfirmationToken(submissionId, email || submission.email, formId || submission.formId, token)) {
+          res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(renderSignupConfirmationPage({
+            success: false,
+            title: 'Confirmation failed',
+            message: 'This confirmation link is invalid or has expired.'
+          }));
+          return;
+        }
+
+        const form = db.getSignupForm(submission.formId);
+        if (!form) {
+          res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(renderSignupConfirmationPage({
+            success: false,
+            title: 'Form not found',
+            message: 'The signup form behind this link is no longer available.'
+          }));
+          return;
+        }
+
+        if (submission.status !== 'confirmed') {
+          const parsedData = (() => {
+            try {
+              return JSON.parse(submission.data || '{}');
+            } catch {
+              return {};
+            }
+          })();
+          upsertContactFromSignupForm(form, parsedData, submissionId);
+          db.confirmFormSubmission(submissionId);
+          notifyDataChanged('contacts', { source: 'signup-form-confirmation', formId: form.id });
+        }
+
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(renderSignupConfirmationPage({
+          success: true,
+          title: 'Subscription confirmed',
+          message: 'Your subscription has been confirmed and your contact record is now active.'
+        }));
+      } catch (error) {
+        logger?.error('Signup confirmation failed', {
+          submissionId,
+          error: error.message
+        });
+        res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(renderSignupConfirmationPage({
+          success: false,
+          title: 'Confirmation failed',
+          message: 'We could not confirm this subscription right now. Please try again later.'
+        }));
       }
       return;
     }
@@ -956,6 +1126,173 @@ function startServiceHealthMonitor() {
 
 
 // ============================================================
+// Signup form helpers
+// ============================================================
+function readJsonRequestBody(req) {
+  return new Promise((resolve, reject) => {
+    let raw = '';
+    req.on('data', (chunk) => {
+      raw += chunk;
+      if (raw.length > 1024 * 1024) {
+        reject(new Error('Request body too large'));
+      }
+    });
+    req.on('end', () => {
+      try {
+        resolve(raw ? JSON.parse(raw) : {});
+      } catch (error) {
+        reject(new Error('Invalid JSON payload'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+function parseSignupFormFields(form) {
+  if (Array.isArray(form?.fields)) return form.fields;
+  try {
+    return JSON.parse(form?.fields || '[]');
+  } catch {
+    return [];
+  }
+}
+
+function getFormConfirmationToken(submissionId, email, formId) {
+  const data = `${submissionId}:${String(email || '').toLowerCase()}:${formId}`;
+  return crypto.createHmac('sha256', hmacSecret).update(data).digest('hex');
+}
+
+function verifyFormConfirmationToken(submissionId, email, formId, token) {
+  try {
+    const expected = getFormConfirmationToken(submissionId, email, formId);
+    if (!token || expected.length !== token.length) return false;
+    return crypto.timingSafeEqual(Buffer.from(token, 'hex'), Buffer.from(expected, 'hex'));
+  } catch {
+    return false;
+  }
+}
+
+function getPrimaryFormSmtpSettings() {
+  const primaryAccount = getPrimarySmtpAccount(true) || getPrimarySmtpAccount(false);
+  return primaryAccount ? decryptSmtpAccount(primaryAccount) : null;
+}
+
+function extractSignupField(data, fieldNames = []) {
+  for (const fieldName of fieldNames) {
+    const value = data?.[fieldName];
+    if (value === undefined || value === null) continue;
+    const normalized = String(value).trim();
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return '';
+}
+
+function upsertContactFromSignupForm(form, submissionData = {}, submissionId = '') {
+  const email = String(extractSignupField(submissionData, ['email'])).toLowerCase();
+  if (!email || !emailService?.validateEmail?.(email)) {
+    throw new Error('A valid email address is required');
+  }
+
+  const existing = db._get('SELECT * FROM contacts WHERE lower(email) = lower(?)', [email]);
+  const payload = {
+    ...(existing || {}),
+    email,
+    firstName: extractSignupField(submissionData, ['firstName', 'firstname']) || existing?.firstName || '',
+    lastName: extractSignupField(submissionData, ['lastName', 'lastname']) || existing?.lastName || '',
+    company: extractSignupField(submissionData, ['company']) || existing?.company || '',
+    phone: extractSignupField(submissionData, ['phone']) || existing?.phone || '',
+    customField1: extractSignupField(submissionData, ['customField1', 'custom1']) || existing?.customField1 || '',
+    customField2: extractSignupField(submissionData, ['customField2', 'custom2']) || existing?.customField2 || ''
+  };
+
+  let contactId = '';
+  const isNew = !existing?.id;
+  if (!isNew) {
+    db.updateContact(payload);
+    contactId = existing.id;
+  } else {
+    contactId = db.addContact(payload);
+  }
+
+  try {
+    db.addContactToList(contactId, form.listId);
+  } catch {}
+
+  if (isNew) {
+    const ctx = { contactId, email, listId: form.listId };
+    automationEngine?.fire?.('contact_added', ctx).catch(() => {});
+    dripEngine?.enqueueContact?.(contactId, email, { listId: form.listId });
+  }
+
+  if (submissionId) {
+    db._run(
+      "UPDATE form_submissions SET contactId = ?, status = 'confirmed', confirmedAt = datetime('now') WHERE id = ?",
+      [contactId, submissionId]
+    );
+  }
+
+  return { contactId, email };
+}
+
+async function sendDoubleOptInEmail(form, submissionId, submissionData = {}) {
+  const smtpSettings = getPrimaryFormSmtpSettings();
+  if (!smtpSettings?.host || !smtpSettings?.fromEmail) {
+    throw new Error('No active SMTP account is available for confirmation email delivery');
+  }
+
+  const email = String(extractSignupField(submissionData, ['email'])).toLowerCase();
+  const confirmLink = `${getCurrentTrackingBaseUrl()}/confirm-subscription/${submissionId}?email=${encodeURIComponent(email)}&formId=${encodeURIComponent(form.id)}&token=${encodeURIComponent(getFormConfirmationToken(submissionId, email, form.id))}`;
+  const subject = String(form.confirmationSubject || 'Please confirm your subscription').trim();
+  const bodyTemplate = String(form.confirmationTemplate || 'Click the link below to confirm your subscription: {{confirmLink}}');
+  const textBody = bodyTemplate
+    .replace(/\{\{confirmLink\}\}/gi, confirmLink)
+    .replace(/\{\{firstName\}\}/gi, extractSignupField(submissionData, ['firstName', 'firstname']) || 'there')
+    .replace(/\{\{email\}\}/gi, email);
+  const htmlBody = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;line-height:1.6;color:#1f2937;">
+    <p>${textBody.replace(/\n/g, '</p><p>')}</p>
+  </div>`;
+
+  const transporter = emailService.createTransporter(smtpSettings);
+  try {
+    await transporter.sendMail({
+      from: `"${smtpSettings.fromName || 'Bulky'}" <${smtpSettings.fromEmail}>`,
+      to: email,
+      replyTo: smtpSettings.replyTo || smtpSettings.fromEmail,
+      subject,
+      text: textBody,
+      html: htmlBody
+    });
+  } finally {
+    try { transporter.close(); } catch {}
+  }
+}
+
+function renderSignupConfirmationPage({ success, title, message }) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${success ? 'Subscription confirmed' : 'Confirmation failed'}</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; padding: 32px; background: #f8fafc; color: #111827; }
+    .card { max-width: 560px; margin: 0 auto; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 18px; padding: 28px; box-shadow: 0 20px 40px rgba(15, 23, 42, 0.08); }
+    h1 { margin: 0 0 12px; font-size: 28px; }
+    p { margin: 0; line-height: 1.7; color: #4b5563; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>${title}</h1>
+    <p>${message}</p>
+  </div>
+</body>
+</html>`;
+}
+
+// ============================================================
 // Real-time data change notifications (renderer push)
 // ============================================================
 const WRITE_CHANNELS = new Set([
@@ -977,7 +1314,10 @@ const WRITE_CHANNELS = new Set([
   'segments:add', 'segments:update', 'segments:delete',
   'retry:clear',
   'spam:addReplacement', 'spam:updateReplacement', 'spam:deleteReplacement',
-  'ai:saveSettings'
+  'ai:saveSettings',
+  'cloud:saveConfig',
+  'account:signUp',
+  'account:signIn', 'account:signOut', 'account:refresh'
 ]);
 
 function getChannelDataTypes(channel) {
@@ -1018,6 +1358,8 @@ function getChannelDataTypes(channel) {
     channel.startsWith('smtpAccounts:') ||
     channel.startsWith('smtp:') ||
     channel.startsWith('settings:') ||
+    channel.startsWith('cloud:') ||
+    channel.startsWith('account:') ||
     channel.startsWith('warmup:') ||
     channel.startsWith('ai:')
   ) {
@@ -1046,7 +1388,7 @@ function notifyDataChanged(type, payload = {}) {
 
 // Input validation helpers
 // NOTE: validateContactInput in ipc/validators.js is the canonical IPC-layer validator.
-// validateContact below uses a { valid, error } shape for backward compat with registerContactsHandlers.
+// The main-process backward-compat contact validator now lives in main-process/handlerRegistry.js.
 function validateRequired(obj, fields) {
   if (!obj || typeof obj !== 'object') return 'Invalid input: expected an object';
   for (const f of fields) {
@@ -1096,138 +1438,98 @@ function safeHandler(channel, handler) {
   });
 }
 
-function validateContact(contact) {
-  if (!contact || typeof contact !== 'object') return { valid: false, error: 'Invalid contact data' };
-  if (!contact.email || typeof contact.email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact.email)) {
-    return { valid: false, error: 'Invalid email address' };
-  }
-  if (contact.firstName && (typeof contact.firstName !== 'string' || contact.firstName.length > 100)) {
-    return { valid: false, error: 'Invalid first name' };
-  }
-  if (contact.lastName && (typeof contact.lastName !== 'string' || contact.lastName.length > 100)) {
-    return { valid: false, error: 'Invalid last name' };
-  }
-  if (contact.company && (typeof contact.company !== 'string' || contact.company.length > 100)) {
-    return { valid: false, error: 'Invalid company' };
-  }
-  if (contact.phone && (typeof contact.phone !== 'string' || contact.phone.length > 20)) {
-    return { valid: false, error: 'Invalid phone' };
-  }
-  return { valid: true };
-}
-
 function registerAllHandlers() {
-  // ---------- Window Controls ----------
-  safeHandler('window:minimize', () => mainWindow?.minimize());
-  safeHandler('window:maximize', () => {
-    if (mainWindow?.isMaximized()) { mainWindow.unmaximize(); }
-    else { mainWindow?.maximize(); }
-  });
-  safeHandler('window:close', () => mainWindow?.close());
-  safeHandler('window:hide', () => mainWindow?.hide());
-  safeHandler('window:show', () => { mainWindow?.show(); mainWindow?.focus(); });
-  safeHandler('window:quit', () => { app.isQuitting = true; cleanup(); app.quit(); });
-
-  registerContactsHandlers({
-    safeHandler,
-    db,
-    dialog,
-    fs,
-    path,
-    validateContact,
-    getMainWindow: () => mainWindow
-  });
-  registerDataHandlers({
-    safeHandler,
-    db,
-    dialog,
-    fs,
-    getMainWindow: () => mainWindow
-  });
-
-  // ---------- Templates ----------
-  registerContentHandlers({
-    safeHandler,
-    db,
-    dialog,
-    fs,
-    path,
-    getMainWindow: () => mainWindow
-  });
-
-  registerSmtpHandlers({
-    safeHandler,
-    db,
-    emailService,
-    decryptSmtpAccount,
-    encryptPassword,
-    validateRequired,
-    getPrimarySmtpAccount
-  });
-
-  registerCampaignHandlers({
-    safeHandler,
-    db,
-    validateRequired,
-    scheduledCampaignTimers,
-    scheduleNextCampaign
-  });
-
-  registerMessagingHandlers({
+  registerAppHandlers({
     safeHandler,
     rateLimitedHandler,
+    app,
+    appVersion: APP_VERSION,
+    cleanup,
     db,
+    dialog,
+    fs,
+    shell,
+    path,
     emailService,
     verificationService,
     decryptSmtpAccount,
+    encryptPassword,
+    entitlementService,
+    cloudConfigService,
+    desktopAccountService,
+    hybridCloudService,
+    syncService,
+    validateRequired,
+    getPrimarySmtpAccount,
+    scheduledCampaignTimers,
+    scheduleNextCampaign,
     logger,
-    getMainWindow: () => mainWindow
-  });
-
-  registerSupportHandlers({
-    safeHandler,
-    db,
+    getMainWindow: () => mainWindow,
     spamService,
     aiService,
+    domainHealthService,
     decryptPassword,
-    encryptPassword
-  });
-
-  registerSettingsHandlers({
-    safeHandler,
-    db,
-    dialog,
-    fs,
-    encryptPassword,
-    decryptSmtpAccount,
     syncTrackingBaseUrl,
-    domainHealthService,
     getConfiguredDkimSelectors,
-    emailService,
-    getMainWindow: () => mainWindow
-  });
-
-  registerOperationsHandlers({
-    safeHandler,
-    db,
-    decryptPassword,
-    domainHealthService,
-    getConfiguredDkimSelectors
-  });
-
-  registerBackupHandlers({
-    safeHandler,
-    db,
-    dialog,
-    fs,
-    app,
-    logger,
-    emailService,
-    cleanup,
     dbPath,
+    userDataPath,
+    getTrackingBaseUrl: getCurrentTrackingBaseUrl,
+    getTrackingHealth: () => ({
+      listening: !!trackingServer?.listening,
+      port: trackingServer?.address()?.port || null,
+      localBaseUrl: getLocalTrackingBaseUrl(),
+      publicBaseUrl: getConfiguredPublicTrackingBaseUrl().baseUrl,
+      source: getConfiguredPublicTrackingBaseUrl().source
+    }),
+    trackingService,
     logDir,
-    getMainWindow: () => mainWindow
+    automationEngine,
+    dripEngine
   });
+}
+
+// ============================================================
+// Auto-updater (GitHub Releases via electron-updater)
+// ============================================================
+function setupAutoUpdater() {
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on('update-available', (info) => {
+    logger?.info('Update available', { version: info.version });
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('updater:status', { status: 'available', version: info.version });
+    }
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    logger?.info('Update downloaded', { version: info.version });
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('updater:status', { status: 'downloaded', version: info.version });
+    }
+    dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: 'Update ready',
+      message: `Bulky ${info.version} is ready to install.`,
+      detail: 'The update will be applied when you next quit the application.',
+      buttons: ['Install Now', 'Later'],
+      defaultId: 0
+    }).then(({ response }) => {
+      if (response === 0) {
+        app.isQuitting = true;
+        autoUpdater.quitAndInstall();
+      }
+    }).catch(() => {});
+  });
+
+  autoUpdater.on('error', (err) => {
+    logger?.warn('Auto-updater error', { error: err.message });
+  });
+
+  // Check after 10s so the window has time to render before any dialog appears
+  setTimeout(() => {
+    autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+  }, 10000);
 }
 
 // ============================================================
@@ -1238,6 +1540,7 @@ app.whenReady().then(async () => {
   registerAllHandlers();
   createWindow();
   createTray();
+  if (app.isPackaged) setupAutoUpdater();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -1279,17 +1582,21 @@ function cleanup() {
     scheduledCampaignTimers.clear();
 
     // Stop intervals
-    if (autoBackupInterval) clearInterval(autoBackupInterval);
-    if (retryInterval) clearInterval(retryInterval);
-    if (memMonitorInterval) clearInterval(memMonitorInterval);
-    if (serviceHealthInterval) clearInterval(serviceHealthInterval);
+      if (autoBackupInterval) clearInterval(autoBackupInterval);
+      if (retryInterval) clearInterval(retryInterval);
+      if (dripInterval) clearInterval(dripInterval);
+      if (memMonitorInterval) clearInterval(memMonitorInterval);
+      if (serviceHealthInterval) clearInterval(serviceHealthInterval);
+      syncService?.dispose?.();
+      desktopAccountService?.dispose?.();
 
-    // Close tracking server
-    if (trackingServer) {
-      trackingServer.close();
-    }
+      // Close tracking server
+      if (trackingServer) {
+        trackingServer.close();
+      }
 
     emailService?.dispose?.();
+    dripEngine?.dispose?.();
 
     // Flush database
     if (db) {

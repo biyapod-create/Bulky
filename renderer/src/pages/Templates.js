@@ -9,6 +9,7 @@ import { useNavigation } from '../components/NavigationContext';
 
 import TemplateBuilder, { createBlock, generateFullHtml } from '../components/TemplateBuilder';
 import { buildEmailPreviewDocument } from '../utils/emailPreview';
+const { analyzeMergeTags, applyPreviewPersonalization } = require('../utils/contentReadiness');
 
 const CATEGORIES = [
   { id: 'all', label: 'All Templates', icon: Grid },
@@ -51,27 +52,30 @@ const HTML_STARTERS = {
 </section>`
 };
 
-const BUILDER_AI_PRESETS = [
+const HTML_AI_PRESETS = [
   {
     label: 'Welcome',
-    prompt: 'Create a warm welcome email for new subscribers.',
+    prompt: 'Create a polished welcome email for new subscribers with a premium hero, a short benefits section, and one clear CTA.',
     objective: 'Introduce the brand and drive a first click',
     cta: 'Explore the welcome offer',
-    tone: 'warm'
+    tone: 'warm',
+    format: 'welcome'
   },
   {
     label: 'Promo',
-    prompt: 'Create a conversion-focused promotional email with a strong offer and urgency.',
+    prompt: 'Create a conversion-focused promotional email with a stylish hero image, clear offer framing, and one strong CTA.',
     objective: 'Drive clicks and purchases',
     cta: 'Claim the offer',
-    tone: 'confident'
+    tone: 'confident',
+    format: 'promotional'
   },
   {
     label: 'Newsletter',
-    prompt: 'Create a digest-style newsletter with 3 short updates and one clear CTA.',
+    prompt: 'Create a modern newsletter email with a strong headline, three concise updates, and one main CTA.',
     objective: 'Keep subscribers engaged',
     cta: 'Read the full update',
-    tone: 'professional'
+    tone: 'professional',
+    format: 'newsletter'
   }
 ];
 
@@ -169,20 +173,6 @@ function createBuilderSeedBlocks(content, subject = '') {
   return blocks;
 }
 
-function htmlToPlainText(content = '') {
-  if (!content) return '';
-  if (typeof DOMParser !== 'undefined') {
-    try {
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(content, 'text/html');
-      return (doc.body?.textContent || '')
-        .replace(/\s+/g, ' ')
-        .trim();
-    } catch (error) {}
-  }
-  return content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-}
-
 function createBuilderLayout(layout) {
   if (layout === 'promo') {
     const header = createBlock('header');
@@ -278,16 +268,18 @@ function Templates({ isActive }) {
   const [builderName, setBuilderName] = useState('');
   const [builderSubject, setBuilderSubject] = useState('');
   const [builderCategory, setBuilderCategory] = useState('general');
-  const [builderAiBrief, setBuilderAiBrief] = useState({
+  const [htmlAiBrief, setHtmlAiBrief] = useState({
     prompt: '',
     tone: 'professional',
     objective: '',
     audience: '',
-    cta: ''
+    cta: '',
+    offer: '',
+    brandVoice: ''
   });
   // null = creating new template; an id = editing existing one in the builder
   const [editingBuilderTemplateId, setEditingBuilderTemplateId] = useState(null);
-  const [htmlToBuilderLoading, setHtmlToBuilderLoading] = useState(false);
+  const [htmlAiLoading, setHtmlAiLoading] = useState(false);
 
   // Import state
   const [importText, setImportText] = useState('');
@@ -334,7 +326,7 @@ function Templates({ isActive }) {
     if (!openBuilder) return;
 
     if (templateParams.aiBrief) {
-      setBuilderAiBrief(prev => ({
+      setHtmlAiBrief(prev => ({
         ...prev,
         ...templateParams.aiBrief
       }));
@@ -402,6 +394,11 @@ function Templates({ isActive }) {
       addToast('Name and subject are required', 'error');
       return;
     }
+    const mergeTagAnalysis = analyzeMergeTags({ subject: formData.subject, content: formData.content });
+    if (mergeTagAnalysis.unsupported.length > 0) {
+      addToast(`Unsupported merge tags: ${mergeTagAnalysis.unsupported.join(', ')}`, 'error');
+      return;
+    }
 
     try {
       if (editingTemplate) {
@@ -453,27 +450,42 @@ function Templates({ isActive }) {
     navigate('/composer', { state: { templateId: template.id, content: template.content, subject: template.subject } });
   };
 
-  const handleAiGenerateBlocks = async () => {
-    const prompt = builderAiBrief.prompt.trim() || builderSubject.trim();
+  const handleAiGenerateHtmlTemplate = async () => {
+    const prompt = htmlAiBrief.prompt.trim() || formData.subject.trim() || formData.name.trim();
     if (!prompt) {
-      addToast('Add a builder brief or subject first', 'warning');
+      addToast('Add a real AI brief, template name, or subject first', 'warning');
       return;
     }
+
+    setHtmlAiLoading(true);
     try {
-      const result = await window.electron.ai.generateTemplateBlocks({
+      const result = await window.electron.ai.generateContent({
         prompt,
-        tone: builderAiBrief.tone || 'professional',
-        objective: builderAiBrief.objective,
-        audience: builderAiBrief.audience,
-        cta: builderAiBrief.cta,
-        format: 'builder-template'
+        tone: htmlAiBrief.tone || 'professional',
+        objective: htmlAiBrief.objective,
+        audience: htmlAiBrief.audience,
+        cta: htmlAiBrief.cta,
+        offer: htmlAiBrief.offer,
+        brandVoice: htmlAiBrief.brandVoice,
+        format: `responsive-${formData.category || 'general'}-html-template`,
+        includePersonalization: true
       });
-      if (result.blocks) {
-        setBuilderBlocks(result.blocks);
-        addToast('Blocks generated successfully', 'success');
+
+      if (result?.error) {
+        addToast(result.error, 'error');
+        return;
       }
-    } catch (e) {
-      addToast('Failed to generate blocks', 'error');
+
+      setFormData((prev) => ({
+        ...prev,
+        subject: result?.subject || prev.subject,
+        content: result?.html || prev.content
+      }));
+      addToast('AI created a responsive HTML template draft', 'success');
+    } catch (error) {
+      addToast('Failed to generate HTML template', 'error');
+    } finally {
+      setHtmlAiLoading(false);
     }
   };
 
@@ -500,53 +512,6 @@ function Templates({ isActive }) {
     setShowModal(false);
     setActiveTab('builder');
     addToast('HTML draft moved into the builder', 'success');
-  };
-
-  const handleAiConvertHtmlToBuilder = async () => {
-    const plainText = htmlToPlainText(formData.content).slice(0, 900);
-    const prompt = [
-      formData.subject && `Subject: ${formData.subject}`,
-      formData.name && `Template name: ${formData.name}`,
-      plainText && `Source content: ${plainText}`
-    ].filter(Boolean).join('\n');
-
-    if (!prompt) {
-      addToast('Add some HTML content first so AI has something to convert', 'warning');
-      return;
-    }
-
-    setHtmlToBuilderLoading(true);
-    try {
-      const result = await window.electron.ai.generateTemplateBlocks({
-        prompt,
-        tone: 'professional',
-        objective: `Convert the existing HTML into a clean editable ${formData.category || 'general'} email layout`,
-        cta: 'Keep the strongest CTA from the source content',
-        format: 'builder-template'
-      });
-
-      if (result?.error) {
-        addToast(result.error, 'error');
-        return;
-      }
-
-      if (Array.isArray(result?.blocks) && result.blocks.length > 0) {
-        setBuilderName(formData.name || 'AI Converted Draft');
-        setBuilderSubject(formData.subject || '');
-        setBuilderCategory(formData.category || 'general');
-        setBuilderBlocks(result.blocks);
-        setEditingBuilderTemplateId(null);
-        setShowModal(false);
-        setActiveTab('builder');
-        addToast('AI converted your HTML into builder blocks', 'success');
-      } else {
-        addToast('AI did not return any blocks', 'warning');
-      }
-    } catch (error) {
-      addToast('Failed to convert HTML into blocks', 'error');
-    } finally {
-      setHtmlToBuilderLoading(false);
-    }
   };
 
   const handleExportTemplate = async (template) => {
@@ -583,6 +548,11 @@ function Templates({ isActive }) {
       const parsed = JSON.parse(importText);
       if (!parsed.name || !parsed.content) {
         addToast('Invalid template format: missing name or content', 'error');
+        return;
+      }
+      const mergeTagAnalysis = analyzeMergeTags({ subject: parsed.subject || '', content: parsed.content || '' });
+      if (mergeTagAnalysis.unsupported.length > 0) {
+        addToast(`Unsupported merge tags: ${mergeTagAnalysis.unsupported.join(', ')}`, 'error');
         return;
       }
       await window.electron.templates.add({
@@ -632,6 +602,11 @@ function Templates({ isActive }) {
     }
     try {
       const renderedContent = generateFullHtml(builderBlocks);
+      const mergeTagAnalysis = analyzeMergeTags({ subject: builderSubject, content: renderedContent });
+      if (mergeTagAnalysis.unsupported.length > 0) {
+        addToast(`Unsupported merge tags: ${mergeTagAnalysis.unsupported.join(', ')}`, 'error');
+        return;
+      }
       const payload = {
         name: builderName,
         subject: builderSubject,
@@ -686,12 +661,12 @@ function Templates({ isActive }) {
 
   const getCategoryColor = (cat) => {
     const colors = {
-      general: '#6366f1',
-      newsletter: '#3b82f6',
-      promotional: '#f59e0b',
-      transactional: '#10b981',
-      welcome: '#8b5cf6',
-      announcement: '#ef4444'
+      general: '#5bb4d4',
+      newsletter: '#5bb4d4',
+      promotional: '#5bb4d4',
+      transactional: '#5bb4d4',
+      welcome: '#5bb4d4',
+      announcement: '#5bb4d4'
     };
     return colors[cat] || '#6b7280';
   };
@@ -703,13 +678,13 @@ function Templates({ isActive }) {
   };
 
   return (
-    <div>
-      <div className="page-header flex justify-between items-center">
+    <div className="page-container page-templates">
+      <div className="page-header bulky-page-header">
         <div>
           <h1 className="page-title">Templates</h1>
           <p className="page-subtitle">Create, manage, and organize your email templates.</p>
         </div>
-        <div className="flex gap-2">
+        <div className="page-header-actions">
           <button className="btn btn-outline" onClick={handleImportFile}>
             <Download size={16} /> Import
           </button>
@@ -739,7 +714,7 @@ function Templates({ isActive }) {
       {activeTab === 'my-templates' && (
         <div>
           {/* Filter Bar */}
-          <div className="card mb-4">
+          <div className="card filter-toolbar-card mb-4">
             <div className="flex gap-3 items-center flex-wrap">
               <div className="toolbar-search">
                 <Search size={18} />
@@ -770,7 +745,7 @@ function Templates({ isActive }) {
           </div>
 
           {/* Templates Grid */}
-          <div className="card">
+          <div className="card dense-data-card">
             {loading ? (
               <div className="text-center text-muted" style={{ padding: '40px' }}>
                 <Loader2 size={24} style={{ animation: 'spin 1s linear infinite', marginBottom: '8px' }} />
@@ -799,32 +774,15 @@ function Templates({ isActive }) {
                 )}
               </div>
             ) : (
-              <div style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))',
-                gap: '16px'
-              }}>
+              <div className="template-gallery-grid">
                 {filteredTemplates.map(template => (
                   <div
                     key={template.id}
-                    className="card"
-                    style={{
-                      padding: '0',
-                      overflow: 'visible',
-                      border: '1px solid var(--border)',
-                      borderRadius: '12px',
-                    }}
+                    className="card template-gallery-card"
                   >
                     {/* Preview thumbnail */}
                     <div
-                      style={{
-                        height: '160px',
-                        background: '#fff',
-                        borderBottom: '1px solid var(--border)',
-                        overflow: 'hidden',
-                        position: 'relative',
-                        cursor: 'pointer'
-                      }}
+                      className="template-gallery-preview"
                       onClick={() => handlePreview(template)}
                     >
                       <iframe
@@ -861,7 +819,7 @@ function Templates({ isActive }) {
                     </div>
 
                     {/* Card body */}
-                    <div style={{ padding: '14px 16px' }}>
+                    <div className="template-gallery-body">
                       <div className="flex justify-between items-start mb-2">
                         <h4 style={{ fontWeight: 600, fontSize: '14px', margin: 0, lineHeight: 1.3 }}>
                           {template.name}
@@ -962,11 +920,11 @@ function Templates({ isActive }) {
 
       {/* Template Builder Tab */}
       {activeTab === 'builder' && (
-        <div>
+        <div className="template-builder-shell">
           {/* Builder header with save controls */}
           <div className="card mb-4">
             {editingBuilderTemplateId && (
-              <div style={{ marginBottom: '12px', padding: '8px 12px', background: 'rgba(99,102,241,0.1)', borderRadius: '6px', border: '1px solid rgba(99,102,241,0.3)', fontSize: '13px', color: '#6366f1', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ marginBottom: '12px', padding: '8px 12px', background: 'rgba(91,180,212,0.1)', borderRadius: '6px', border: '1px solid rgba(91,180,212,0.3)', fontSize: '13px', color: 'var(--accent)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span>✏️ Editing existing template in builder</span>
                 <button className="btn btn-outline btn-sm" style={{ fontSize: '11px' }} onClick={() => { setEditingBuilderTemplateId(null); setBuilderBlocks([]); setBuilderName(''); setBuilderSubject(''); }}>
                   New Template
@@ -1009,83 +967,9 @@ function Templates({ isActive }) {
             </div>
 
             <div style={{ marginTop: '16px', padding: '16px', borderRadius: '12px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)' }}>
-              <div className="flex justify-between items-center" style={{ gap: '12px', flexWrap: 'wrap', marginBottom: '10px' }}>
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: '13px' }}>AI Builder Brief</div>
-                  <div className="text-sm text-muted">Describe the layout you want, then generate starter blocks that are easier to refine visually.</div>
-                </div>
-                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                  {BUILDER_AI_PRESETS.map((preset) => (
-                    <button
-                      key={preset.label}
-                      type="button"
-                      className="btn btn-outline btn-sm"
-                      onClick={() => setBuilderAiBrief({
-                        prompt: preset.prompt,
-                        tone: preset.tone,
-                        objective: preset.objective,
-                        audience: builderAiBrief.audience,
-                        cta: preset.cta
-                      })}
-                    >
-                      {preset.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <textarea
-                className="form-textarea"
-                rows={3}
-                placeholder="Describe the structure you want, like a hero section, benefits grid, proof, and one CTA."
-                value={builderAiBrief.prompt}
-                onChange={(e) => setBuilderAiBrief(prev => ({ ...prev, prompt: e.target.value }))}
-                style={{ marginBottom: '10px' }}
-              />
-              <div className="form-row">
-                <div className="form-group">
-                  <label className="form-label">Tone</label>
-                  <select
-                    className="form-select"
-                    value={builderAiBrief.tone}
-                    onChange={(e) => setBuilderAiBrief(prev => ({ ...prev, tone: e.target.value }))}
-                  >
-                    <option value="professional">Professional</option>
-                    <option value="friendly">Friendly</option>
-                    <option value="warm">Warm</option>
-                    <option value="confident">Confident</option>
-                    <option value="urgent">Urgent</option>
-                  </select>
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Audience</label>
-                  <input
-                    className="form-input"
-                    value={builderAiBrief.audience}
-                    onChange={(e) => setBuilderAiBrief(prev => ({ ...prev, audience: e.target.value }))}
-                    placeholder="New users, warm leads, current customers..."
-                  />
-                </div>
-              </div>
-              <div className="form-row">
-                <div className="form-group">
-                  <label className="form-label">Objective</label>
-                  <input
-                    className="form-input"
-                    value={builderAiBrief.objective}
-                    onChange={(e) => setBuilderAiBrief(prev => ({ ...prev, objective: e.target.value }))}
-                    placeholder="Drive demo bookings, announce a launch..."
-                  />
-                </div>
-                <div className="form-group">
-                  <label className="form-label">CTA</label>
-                  <input
-                    className="form-input"
-                    value={builderAiBrief.cta}
-                    onChange={(e) => setBuilderAiBrief(prev => ({ ...prev, cta: e.target.value }))}
-                    placeholder="Book a demo, view the offer..."
-                  />
-                </div>
+              <div style={{ fontWeight: 600, fontSize: '13px', marginBottom: '6px' }}>Manual Builder Workflow</div>
+              <div className="text-sm text-muted">
+                The drag-and-drop builder is now manual-only. Add blocks, reorder them, and tune spacing visually without AI-generated block structures interfering with the layout.
               </div>
             </div>
 
@@ -1133,9 +1017,6 @@ function Templates({ isActive }) {
                 <button className="btn btn-primary" onClick={saveBuilderTemplate}>
                   Save Template
                 </button>
-                <button className="btn btn-outline" onClick={handleAiGenerateBlocks} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  ✨ AI Generate Blocks
-                </button>
                 <button className="btn btn-outline" onClick={() => { setBuilderBlocks([]); setBuilderName(''); setBuilderSubject(''); }}>
                   Clear
                 </button>
@@ -1174,8 +1055,8 @@ function Templates({ isActive }) {
             <button className="btn btn-outline" onClick={handleOpenHtmlInBuilder}>
               <LayoutTemplate size={14} /> Open in Builder
             </button>
-            <button className="btn btn-outline" onClick={handleAiConvertHtmlToBuilder} disabled={htmlToBuilderLoading}>
-              {htmlToBuilderLoading ? <Loader2 size={14} className="spin" /> : <Wand2 size={14} />} AI Convert
+            <button className="btn btn-outline" onClick={handleAiGenerateHtmlTemplate} disabled={htmlAiLoading}>
+              {htmlAiLoading ? <Loader2 size={14} className="spin" /> : <Wand2 size={14} />} AI Create HTML
             </button>
             <button className="btn btn-primary" onClick={handleSave}>
               {editingTemplate ? 'Update' : 'Create'} Template
@@ -1223,6 +1104,120 @@ function Templates({ isActive }) {
             <span className="text-xs text-muted">
               Variables: {'{{firstName}}'}, {'{{lastName}}'}, {'{{email}}'}, {'{{company}}'}, {'{{unsubscribeLink}}'}
             </span>
+          </div>
+          <div
+            style={{
+              display: 'grid',
+              gap: '10px',
+              marginBottom: '12px',
+              padding: '14px',
+              borderRadius: '12px',
+              background: 'var(--bg-tertiary)',
+              border: '1px solid var(--border)'
+            }}
+          >
+            <div className="flex justify-between items-center" style={{ gap: '12px', flexWrap: 'wrap' }}>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: '13px' }}>AI HTML Creator</div>
+                <div className="text-sm text-muted">Use AI for polished responsive HTML templates. The drag-and-drop builder stays manual.</div>
+              </div>
+              <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                {HTML_AI_PRESETS.map((preset) => (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    onClick={() => {
+                      setFormData((prev) => ({
+                        ...prev,
+                        category: preset.format || prev.category
+                      }));
+                      setHtmlAiBrief((prev) => ({
+                        ...prev,
+                        prompt: preset.prompt,
+                        objective: preset.objective,
+                        cta: preset.cta,
+                        tone: preset.tone
+                      }));
+                    }}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <textarea
+              className="form-textarea"
+              rows={3}
+              placeholder="Describe the template you want, including layout, mood, offer, and any imagery direction."
+              value={htmlAiBrief.prompt}
+              onChange={(e) => setHtmlAiBrief((prev) => ({ ...prev, prompt: e.target.value }))}
+            />
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label">Tone</label>
+                <select
+                  className="form-select"
+                  value={htmlAiBrief.tone}
+                  onChange={(e) => setHtmlAiBrief((prev) => ({ ...prev, tone: e.target.value }))}
+                >
+                  <option value="professional">Professional</option>
+                  <option value="friendly">Friendly</option>
+                  <option value="warm">Warm</option>
+                  <option value="confident">Confident</option>
+                  <option value="urgent">Urgent</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label className="form-label">Audience</label>
+                <input
+                  className="form-input"
+                  value={htmlAiBrief.audience}
+                  onChange={(e) => setHtmlAiBrief((prev) => ({ ...prev, audience: e.target.value }))}
+                  placeholder="New leads, customers, subscribers..."
+                />
+              </div>
+            </div>
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label">Objective</label>
+                <input
+                  className="form-input"
+                  value={htmlAiBrief.objective}
+                  onChange={(e) => setHtmlAiBrief((prev) => ({ ...prev, objective: e.target.value }))}
+                  placeholder="Drive clicks, welcome users, announce a launch..."
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">CTA</label>
+                <input
+                  className="form-input"
+                  value={htmlAiBrief.cta}
+                  onChange={(e) => setHtmlAiBrief((prev) => ({ ...prev, cta: e.target.value }))}
+                  placeholder="Book a demo, explore the offer..."
+                />
+              </div>
+            </div>
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label">Offer / Hook</label>
+                <input
+                  className="form-input"
+                  value={htmlAiBrief.offer}
+                  onChange={(e) => setHtmlAiBrief((prev) => ({ ...prev, offer: e.target.value }))}
+                  placeholder="Free audit, seasonal launch, onboarding value..."
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Brand Voice</label>
+                <input
+                  className="form-input"
+                  value={htmlAiBrief.brandVoice}
+                  onChange={(e) => setHtmlAiBrief((prev) => ({ ...prev, brandVoice: e.target.value }))}
+                  placeholder="Elegant, bold, calm, premium..."
+                />
+              </div>
+            </div>
           </div>
           <div
             style={{
@@ -1295,7 +1290,7 @@ function Templates({ isActive }) {
                 key={`${formData.subject}-${formData.content.length}`}
                 srcDoc={buildEmailPreviewDocument({
                   subject: formData.subject || '(No Subject)',
-                  content: formData.content || getDefaultContent(),
+                  content: applyPreviewPersonalization(formData.content || getDefaultContent()),
                   clientLabel: 'HTML Preview',
                   clientStyle: { fontFamily: 'Arial, sans-serif', background: '#f8fafc', accent: '#2563eb' }
                 })}
@@ -1340,8 +1335,8 @@ function Templates({ isActive }) {
               <strong>{previewTemplate.subject || 'No subject'}</strong>
             </div>
 
-            {/* Rendered preview — uses buildEmailPreviewDocument so that full HTML
-                pastes (with <html><head><style>…) render correctly. Styles defined
+            {/* Rendered preview -- uses buildEmailPreviewDocument so that full HTML
+                pastes (with <html><head><style>...) render correctly. Styles defined
                 inside <style> blocks in the head are extracted and re-injected, so
                 they actually apply instead of being stripped by dangerouslySetInnerHTML. */}
             <div style={{
@@ -1354,7 +1349,7 @@ function Templates({ isActive }) {
                 key={previewTemplate.id}
                 srcDoc={buildEmailPreviewDocument({
                   subject: previewTemplate.subject,
-                  content: previewTemplate.content,
+                  content: applyPreviewPersonalization(previewTemplate.content),
                   clientLabel: 'Preview',
                   clientStyle: { fontFamily: 'Arial, sans-serif', background: '#ffffff', accent: '#1a73e8' }
                 })}
