@@ -1,6 +1,6 @@
 {
   "name": "bulky",
-  "version": "6.1.0",
+  "version": "6.2.0",
   "description": "Bulky Email Sender v6.1.0 by AllenRetro - Professional bulk email sender without subscription limitations. Features: Tracking, Tags, Scheduling, Spintax, Multi-SMTP, Warmup, Automations, Drip Sequences, Signup Forms, Inbox Placement, AI Assistant.",
   "main": "main.js",
   "author": "AllenRetro",
